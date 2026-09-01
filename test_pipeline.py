@@ -124,11 +124,20 @@ post("/api/bridge/heartbeat", {"disk_free_gb": 15.2})
 assert get("/api/captions?since=0")["disk_warn"] is True
 post("/api/bridge/heartbeat", {"disk_free_gb": 500})
 assert get("/api/captions?since=0")["disk_warn"] is False
-post("/api/bridge/heartbeat", {"disk_free_gb": 500, "window_found": False, "error": "test error"})
-pvp = get("/api/captions?since=0")
+# The real host bridge heartbeats concurrently with the test; re-post until
+# the poll observes the waiting state we just sent (converges in one round).
+for _ in range(10):
+    post("/api/bridge/heartbeat", {"disk_free_gb": 500, "window_found": False, "error": "test error"})
+    pvp = get("/api/captions?since=0")
+    if pvp["bridge_window"] is False:
+        break
+assert pvp["bridge_online"] is True, "waiting for the window must still count as alive"
 assert pvp["bridge_window"] is False and pvp["bridge_error"] == "test error"
-post("/api/bridge/heartbeat", {"window_found": True, "error": None})
-pvp = get("/api/captions?since=0")
+for _ in range(10):
+    post("/api/bridge/heartbeat", {"window_found": True, "error": None})
+    pvp = get("/api/captions?since=0")
+    if pvp["bridge_window"] is True:
+        break
 assert pvp["bridge_window"] is True and pvp["bridge_error"] is None
 marker = f"quasimodo {uuid.uuid4().hex[:6]}"
 sid2 = post("/api/sessions", {"title": "Search"})["id"]

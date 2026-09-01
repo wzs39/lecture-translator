@@ -232,13 +232,17 @@ async function poll() {
       addLine(l.text, l.translation, l.offset);
     }
     pollSince = j.next;
-    $("bridgeLamp").textContent = j.bridge_online ? "🟢 字幕桥在线" : "🔴 字幕桥离线";
-    $("bridgeLamp").style.color = j.bridge_online ? "#6fe38b" : "var(--dim)";
+    const waiting = j.bridge_online && j.bridge_window === false;   // alive but no caption window yet
+    $("bridgeLamp").textContent = waiting ? "🟡 字幕桥等待字幕窗口"
+      : (j.bridge_online ? "🟢 字幕桥在线" : "🔴 字幕桥离线");
+    $("bridgeLamp").style.color = waiting ? "#f0c36d" : (j.bridge_online ? "#6fe38b" : "var(--dim)");
     const winTxt = j.bridge_window == null ? "未知" : (j.bridge_window ? "已找到" : "等待打开(Win+Ctrl+L)");
     $("bridgeLamp").title = `字幕窗口：${winTxt}${j.bridge_error ? " · 最近错误：" + j.bridge_error : ""}`;
-    $("bridgeDetail").textContent = j.bridge_online
-      ? `窗口 ${winTxt}${j.bridge_error ? " · ⚠️ " + j.bridge_error : ""}`
-      : "备用：可用下方 ③ 浏览器语音识别继续出字幕，或双击 start-captions.bat 重启桥";
+    $("bridgeDetail").textContent = waiting
+      ? "桥已启动，正在等待实时字幕窗口（按 Win+Ctrl+L 打开）"
+      : (j.bridge_online
+        ? `窗口 ${winTxt}${j.bridge_error ? " · ⚠️ " + j.bridge_error : ""}`
+        : "备用：可用下方 ③ 浏览器语音识别继续出字幕，或双击 start-captions.bat 重启桥");
     if (j.disk_warn) { $("diskWarn").style.display = "block"; $("diskFreeText").textContent = j.disk_free_gb; }
     else $("diskWarn").style.display = "none";
     if (j.lines.length) setStatus("capturing", `${original.length} 段`);

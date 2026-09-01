@@ -357,6 +357,12 @@ def main():
         sys.exit(_selfcheck(args.url, args.disk))
     _lock_singleton()  # exits(3) if another bridge is already running
 
+    tracker = SentenceTracker()
+    chunker = Chunker()
+    delivery = Delivery(args.url)
+    # Heartbeat from the very start: while the caption window is not open the
+    # page should show "bridge alive, waiting for the window", not "bridge down".
+    _heartbeat(args.url, args.disk)
     print(f"bridge: backend {args.url}; looking for the Live Captions window...")
     win = None
     while win is None:
@@ -367,11 +373,6 @@ def main():
             time.sleep(3)
     BRIDGE_STATE["window"] = True
     print(f"  found: '{win.Name}' — capturing (Ctrl+C to stop)")
-
-    tracker = SentenceTracker()
-    chunker = Chunker()
-    delivery = Delivery(args.url)
-    _heartbeat(args.url, args.disk)
     pending = len(delivery.unsent)
     if pending:
         print(f"  resending {pending} cached chunk(s) from a previous run...")
