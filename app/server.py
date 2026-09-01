@@ -775,6 +775,23 @@ def create_category(req: CategoryReq):
     return {"categories": _categories()}
 
 
+def _reclass_references(old: str, new: str):
+    """Re-point every session and saved summary from one category to another."""
+    for p in DATA_DIR.glob("session-*.json"):  # courses keep their data
+        try:
+            s = json.loads(p.read_text(encoding="utf-8"))
+            if s.get("category") == old:
+                s["category"] = new
+                p.write_text(json.dumps(s, ensure_ascii=False, indent=2), encoding="utf-8")
+        except (OSError, json.JSONDecodeError):
+            pass
+    data = _load_json(SUMMARIES_FILE, {"summaries": []})
+    for s in data.get("summaries", []):
+        if s.get("category") == old:
+            s["category"] = new
+    _save_json(SUMMARIES_FILE, data)
+
+
 @app.patch("/api/categories")
 def rename_category(req: CategoryRenameReq):
     name, new_name = req.name.strip(), req.new_name.strip()
@@ -783,21 +800,8 @@ def rename_category(req: CategoryRenameReq):
     cats = _load_json(CATEGORIES_FILE, [])
     if name not in cats:
         raise HTTPException(404, "category not found")
-    cats = [new_name if c == name else c for c in cats]
-    _save_json(CATEGORIES_FILE, cats)
-    for p in DATA_DIR.glob("session-*.json"):  # courses keep their data
-        try:
-            s = json.loads(p.read_text(encoding="utf-8"))
-            if s.get("category") == name:
-                s["category"] = new_name
-                p.write_text(json.dumps(s, ensure_ascii=False, indent=2), encoding="utf-8")
-        except (OSError, json.JSONDecodeError):
-            pass
-    data = _load_json(SUMMARIES_FILE, {"summaries": []})
-    for s in data.get("summaries", []):
-        if s.get("category") == name:
-            s["category"] = new_name
-    _save_json(SUMMARIES_FILE, data)
+    _save_json(CATEGORIES_FILE, [new_name if c == name else c for c in cats])
+    _reclass_references(name, new_name)
     return {"categories": _categories()}
 
 
@@ -807,19 +811,7 @@ def delete_category(name: str):
     if name in cats:
         cats.remove(name)
         _save_json(CATEGORIES_FILE, cats)
-    for p in DATA_DIR.glob("session-*.json"):
-        try:
-            s = json.loads(p.read_text(encoding="utf-8"))
-            if s.get("category") == name:
-                s["category"] = "未分类"
-                p.write_text(json.dumps(s, ensure_ascii=False, indent=2), encoding="utf-8")
-        except (OSError, json.JSONDecodeError):
-            pass
-    data = _load_json(SUMMARIES_FILE, {"summaries": []})
-    for s in data.get("summaries", []):
-        if s.get("category") == name:
-            s["category"] = "未分类"
-    _save_json(SUMMARIES_FILE, data)
+    _reclass_references(name, "未分类")
     return {"categories": _categories()}
 
 
@@ -833,7 +825,7 @@ def save_summary(req: SummaryReq):
               "title": req.title.strip() or "AI 整理",
               "text": req.text.strip()[:200000],
               "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
-    data.setdefault("summaries", []).append(record)
+    data["summaries"] = data.get("summaries", []) + [record]
     _save_json(SUMMARIES_FILE, data)
     return record
 

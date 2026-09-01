@@ -504,7 +504,7 @@ $("addCategoryBtn").onclick = async () => {
   loadStorage();
 };
 $("saveSummaryBtn").onclick = async () => {
-  if (!lastOrganizeText) return setStatus("no organized text yet — 先点 AI 整理", "");
+  if (!lastOrganizeText) return setStatus("no organized text yet — 先点 AI 整理");
   const cat = $("summaryCategory").value || "未分类";
   const r = await fetch("/api/summaries", {method:"POST", headers:{"Content-Type":"application/json"},
     body: JSON.stringify({category: cat, title: `AI 整理 ${new Date().toISOString().slice(0,10)}`, text: lastOrganizeText})});
