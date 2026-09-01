@@ -7,8 +7,8 @@ sessions, classroom AI tools, and a persistent transcript.
 ```
 Windows Live Captions (Win+Ctrl+L, high-quality on-device ASR)
    └─> bridge/live_captions_bridge.py (host, UI Automation)
-         └─> app container:  /api/captions -> Ollama Qwen translation (GPU)
-               └─> subtitle page + session transcript (Docker volume)
+         └─> app container: /api/captions -> local Ollama (GPU) or cloud AI API
+               └─> subtitle page + course transcripts (Docker volume)
 ```
 
 ## One-click install as a desktop app (recommended)
@@ -19,6 +19,8 @@ Windows Live Captions (Win+Ctrl+L, high-quality on-device ASR)
 2. Double-click the desktop shortcut → press **启动**. The launcher starts
    Docker Desktop if needed, brings up the stack, launches the caption bridge
    minimized, and opens the browser. **停止** shuts the stack and bridge down.
+   It shows an update banner when a newer `version.txt` exists on GitHub, and
+   supports `--version` / `--selftest`.
 3. Rebuild the launcher after edits: `launcher\build.bat` (uses the .NET
    Framework csc.exe that ships with Windows; no installs).
 
@@ -34,14 +36,28 @@ Windows Live Captions (Win+Ctrl+L, high-quality on-device ASR)
    course session automatically.
 5. To stop: close the bridge window, then `stop.bat`.
 
-## What you get
+## Features
 
-- Live subtitles: original caption + Chinese translation, with timestamps.
-- Course sessions: every committed sentence is persisted to the session's
-  transcript (`GET /api/sessions/{id}`) for replay and export.
-- Classroom tools: grounded Q&A ("问 AI"), term extraction, transcript-
-  preserving AI notes, Markdown export with `[mm:ss]` timestamps.
-- Self-check: `GET /api/self-check` (`ready: true` means Ollama + model + data dir OK).
+- **Live subtitles**: original caption + Chinese translation, with timestamps.
+- **Courses**: create/switch courses; every committed sentence is persisted
+  to the course transcript (`GET /api/sessions/{id}`) for replay and export.
+- **Glossary 术语表**: extracted terms are saved into the course and injected
+  into the AI prompt, so the same term translates consistently.
+- **AI classroom tools**: grounded Q&A (问 AI), term extraction, notes that
+  keep the original text (整理); AI summaries can be saved into categories.
+- **Categories & storage ⑥**: create/rename/delete categories (courses and
+  summaries follow), storage snapshot, one-click test-data cleanup, clear log.
+- **Search & stats**: keyword search across all courses; per-course statistics.
+- **Export**: Markdown with `[mm:ss]` timestamps, Word .doc, Anki/Quizlet CSV,
+  SRT.
+- **Resilient bridge**: single-instance lock, crash auto-restart, window
+  re-discovery every 10 s, and heartbeats even while waiting for the caption
+  window — the page shows 🟢 online / 🟡 waiting for window / 🔴 offline.
+- **Disk warning**: page banner when the data drive drops below 20 GB free.
+- **Browser speech fallback**: ③ 浏览器语音识别 (Web Speech API) for languages
+  Live Captions lacks, e.g. Finnish.
+- **Self-check**: `GET /api/self-check`, `bridge --selfcheck`, and the
+  executable contract suite `python test_pipeline.py`.
 
 ## Notes
 

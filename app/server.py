@@ -908,17 +908,6 @@ def delete_summary(sid: str):
     return {"deleted": sid}
 
 
-@app.get("/api/health")
-async def health():
-    ok_ollama = False
-    try:
-        async with httpx.AsyncClient(timeout=3) as cx:
-            ok_ollama = (await cx.get(f"{CONFIG['url']}/api/tags")).status_code == 200
-    except Exception:
-        pass
-    return {"source": "windows-live-captions", "ollama": ok_ollama, "model": CONFIG["model"], "self_check": "/api/self-check"}
-
-
 @app.on_event("startup")
 async def warm_ollama():
     """Preload the model at startup so the first real caption doesn't pay
