@@ -78,6 +78,7 @@ class AskReq(BaseModel):
 class SessionReq(BaseModel):
     title: str = "Untitled lecture"
     language: str = "auto"
+    category: str = "未分类"
 
 
 class ConfigReq(BaseModel):
@@ -303,13 +304,14 @@ async def ask(req: AskReq):
 def create_session(req: SessionReq):
     sid = uuid.uuid4().hex
     path = DATA_DIR / f"session-{sid}.json"
-    path.write_text(json.dumps({"id": sid, "title": req.title.strip() or "Untitled lecture", "language": req.language, "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "transcript": [], "notes": "", "glossary": {}, "terms": []}, ensure_ascii=False, indent=2), encoding="utf-8")
+    path.write_text(json.dumps({"id": sid, "title": req.title.strip() or "Untitled lecture", "language": req.language, "category": req.category.strip() or "未分类", "archived": False, "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "transcript": [], "notes": "", "glossary": {}, "terms": []}, ensure_ascii=False, indent=2), encoding="utf-8")
     return json.loads(path.read_text(encoding="utf-8"))
 
 
 @app.get("/api/sessions")
-def sessions():
-    return [json.loads(p.read_text(encoding="utf-8")) for p in sorted(DATA_DIR.glob("session-*.json"), key=lambda p: p.stat().st_mtime, reverse=True)]
+def sessions(category: str = ""):
+    items = [json.loads(p.read_text(encoding="utf-8")) for p in sorted(DATA_DIR.glob("session-*.json"), key=lambda p: p.stat().st_mtime, reverse=True)]
+    return [s for s in items if not category or s.get("category", "未分类") == category]
 
 
 def _session_path(sid: str) -> Path:
@@ -393,6 +395,8 @@ def _storage_snapshot():
         try:
             s = json.loads(p.read_text(encoding="utf-8"))
             sessions.append({"id": s["id"], "title": s.get("title", ""),
+                             "category": s.get("category", "未分类"),
+                             "archived": bool(s.get("archived", False)),
                              "created": s.get("created_at", ""),
                              "segments": len(s.get("transcript", [])),
                              "size": p.stat().st_size})
@@ -684,6 +688,22 @@ def search_sessions(q: str = ""):
         if len(hits) >= 50:
             break
     return {"hits": hits[:50]}
+
+
+class ArchiveReq(BaseModel):
+    archived: bool
+    category: str | None = None
+
+
+@app.patch("/api/sessions/{sid}")
+def update_session(sid: str, req: ArchiveReq):
+    path = _session_path(sid)
+    session = json.loads(path.read_text(encoding="utf-8"))
+    session["archived"] = req.archived
+    if req.category is not None and req.category.strip():
+        session["category"] = req.category.strip()
+    path.write_text(json.dumps(session, ensure_ascii=False, indent=2), encoding="utf-8")
+    return session
 
 
 @app.post("/api/sessions/{sid}/activate")

@@ -3,8 +3,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 HOST = "http://localhost:8000"
 
-def post_json(path, value={}):
-    req = urllib.request.Request(HOST + path, data=json.dumps(value).encode(), headers={"Content-Type": "application/json"}, method="POST")
+def post_json(path, value={}, method="POST"):
+    req = urllib.request.Request(HOST + path, data=json.dumps(value).encode(), headers={"Content-Type": "application/json"}, method=method)
     return json.load(urllib.request.urlopen(req, timeout=180))
 
 def get_json(path):
@@ -20,7 +20,8 @@ assert isinstance(post_json("/api/terms", {"text": "Photosynthesis converts ligh
 # captions pipeline: push a sentence like the bridge does, poll it back, and
 # confirm it lands in the active session's persisted transcript.
 before = len(get_json("/api/captions?since=0")["lines"])
-sid = post_json("/api/sessions", {"title": "Captions", "language": "auto"})["id"]
+sid = post_json("/api/sessions", {"title": "Captions", "language": "auto", "category": "Biology"})["id"]
+assert get_json(f"/api/sessions/{sid}")["category"] == "Biology"
 assert post_json(f"/api/sessions/{sid}/activate") == {"active": sid}
 import uuid
 cap_text = f"Contract caption {uuid.uuid4().hex[:8]} for the pipeline test."
@@ -42,6 +43,13 @@ try:
     raise SystemExit("unknown session should 404")
 except urllib.error.HTTPError as e:
     assert e.code == 404
+
+# Archive/category management keeps a course available for later replay.
+archived = post_json(f"/api/sessions/{sid}", {"archived": True}, method="PATCH")
+assert archived["archived"] is True
+assert not any(x["id"] == sid for x in get_json("/api/sessions").copy() if not x.get("archived", False))
+assert any(x["id"] == sid for x in get_json("/api/sessions?category=Biology"))
+post_json(f"/api/sessions/{sid}", {"archived": False, "category": "Biology"}, method="PATCH")
 
 # storage management: snapshot lists the session; deletion removes it
 snap = get_json("/api/storage")
