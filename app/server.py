@@ -416,6 +416,34 @@ def clear_captions_log():
     return {"cleared": True}
 
 
+TEST_TITLES = {"Search", "CatSession", "MigVerify", "Captions", "Glossary", "Soak"}
+
+
+@app.post("/api/test-cleanup")
+def test_cleanup():
+    """One-click removal of contract/soak test courses + the caption log."""
+    deleted = []
+    for p in DATA_DIR.glob("session-*.json"):
+        try:
+            s = json.loads(p.read_text(encoding="utf-8"))
+            if s.get("title") in TEST_TITLES:
+                p.unlink()
+                deleted.append(s["id"])
+        except (OSError, json.JSONDecodeError):
+            pass
+    if ACTIVE_SESSION["id"] in deleted:
+        ACTIVE_SESSION["id"] = None
+    log = DATA_DIR / "captions-log.jsonl"
+    log_lines = 0
+    if log.is_file():
+        try:
+            log_lines = sum(1 for _ in log.open(encoding="utf-8"))
+        except OSError:
+            log_lines = 0
+        log.unlink()
+    return {"deleted": deleted, "deleted_count": len(deleted), "log_lines": log_lines}
+
+
 @app.get("/api/self-check")
 async def self_check():
     checks = {"service": "ok", "ollama": "down", "model": "unknown", "data_dir": DATA_DIR.is_dir()}

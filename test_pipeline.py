@@ -54,7 +54,7 @@ page = urllib.request.urlopen(HOST + "/").read().decode()
 assert all(m in page for m in ["实时字幕", "字幕桥", "问 AI", "导出 Markdown",
                                "saveDoc", "ankiBtn", "statsBtn", "本地 Ollama",
                                "分类管理", "AI 总结", "saveSummaryBtn",
-                               "addCategoryBtn", "summaryList"])
+                               "addCategoryBtn", "summaryList", "cleanTestBtn"])
 
 # --- real model paths ----------------------------------------------------
 assert post("/api/translate", {"text": "Our next lecture covers chapter five."})["text"]
@@ -149,5 +149,11 @@ expect(400, "/api/captions", "POST", {"text": "   "})
 expect(404, "/api/sessions/deadbeef/activate", "POST")
 expect(404, f"/api/sessions/{sid}")
 expect(400, "/api/ai/detect", detail_contains="API Key")
+
+# --- test-data cleanup: removes test-named courses + caption log ----------
+clean_sid = post("/api/sessions", {"title": "MigVerify"})["id"]
+j = post("/api/test-cleanup")
+assert clean_sid in j["deleted"] and j["deleted_count"] >= 1 and j["log_lines"] > 0
+assert all(s["id"] != clean_sid for s in get("/api/storage")["sessions"])
 
 print("lecture translator contract: passed")

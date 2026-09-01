@@ -159,6 +159,7 @@
     <label><input id="showArchived" type="checkbox"> 显示已归档</label>
     <button id="storageRefresh" class="ghost">刷新占用</button>
     <button id="clearLog" class="ghost">清空字幕日志</button>
+    <button id="cleanTestBtn" class="ghost">清理测试数据</button>
     <span id="storageSummary" style="color:var(--dim);font-size:13px"></span>
   </div>
   <div id="storageList" style="margin-top:8px;font-size:13px"></div>
@@ -576,6 +577,13 @@ $("clearLog").onclick = async () => {
   if (!confirm("清空字幕日志（不影响课程会话）？")) return;
   await fetch("/api/captions-log", {method:"DELETE"});
   loadStorage();
+};
+$("cleanTestBtn").onclick = async () => {
+  if (!confirm("删除所有测试课程（Search / CatSession / MigVerify / Soak 等）并清空字幕日志？不影响真实课程。")) return;
+  const j = await (await fetch("/api/test-cleanup", {method:"POST"})).json();
+  if (sessionId && j.deleted.includes(sessionId)) { sessionId = null; $("sessionLabel").textContent = "未创建"; }
+  loadStorage();
+  setStatus("test data cleaned", `${j.deleted_count} 门课程 · 日志 ${j.log_lines} 行`);
 };
 
 $("newSession").onclick = createSession; $("askBtn").onclick = askAI; $("exportBtn").onclick = exportMarkdown;
