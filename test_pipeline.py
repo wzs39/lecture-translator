@@ -56,7 +56,7 @@ assert all(m in page for m in ["实时字幕", "字幕桥", "问 AI", "导出 Ma
                                "saveDoc", "ankiBtn", "statsBtn", "本地 Ollama",
                                "分类管理", "AI 总结", "saveSummaryBtn",
                                "addCategoryBtn", "summaryList", "cleanTestBtn",
-                               "diskWarn", "bridgeDetail"])
+                               "diskWarn", "bridgeDetail", "reviewBtn"])
 
 # --- real model paths ----------------------------------------------------
 assert post("/api/translate", {"text": "Our next lecture covers chapter five."})["text"]
@@ -163,6 +163,21 @@ assert get(f"/api/sessions/{scat}")["category"] == "未分类"
 assert get(f"/api/summaries/{sumid}")["category"] == "未分类"
 expect(200, f"/api/summaries/{sumid}", "DELETE")
 expect(404, f"/api/summaries/{sumid}")
+
+# --- review booklet: all summaries (or one category) as one Markdown file ---
+r1 = uuid.uuid4().hex[:6]
+sum_a = post("/api/summaries", {"category": "BookletA", "title": "L1", "text": f"alpha notes {r1}"})["id"]
+r2 = uuid.uuid4().hex[:6]
+sum_b = post("/api/summaries", {"category": "BookletB", "title": "L2", "text": f"beta notes {r2}"})["id"]
+md_a = urllib.request.urlopen(HOST + "/api/review?category=BookletA").read().decode()
+assert f"alpha notes {r1}" in md_a and f"beta notes {r2}" not in md_a and "## BookletA" in md_a
+md_all = urllib.request.urlopen(HOST + "/api/review").read().decode()
+assert f"alpha notes {r1}" in md_all and f"beta notes {r2}" in md_all
+assert "## BookletA" in md_all and "## BookletB" in md_all
+assert md_all.startswith("# 期末复习册")
+expect(404, "/api/review?category=NopeNotFound")
+for s in (sum_a, sum_b):
+    expect(200, f"/api/summaries/{s}", "DELETE")
 
 # --- bridge self-check (host-side diagnostics must pass) ------------------
 venv_py = os.path.join("bridge", ".venv", "Scripts", "python.exe")

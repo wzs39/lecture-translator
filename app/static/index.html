@@ -175,6 +175,7 @@
     <b style="font-size:13px">AI 总结：</b>
     <select id="summaryCatFilter"><option value="">全部总结</option></select>
     <button id="summaryRefresh" class="ghost">刷新</button>
+    <button id="reviewBtn" class="ghost">📖 导出复习册</button>
   </div>
   <div id="summaryList" style="margin-top:6px;font-size:13px"></div>
   <div class="row" style="margin-top:12px">
@@ -529,6 +530,15 @@ $("saveSummaryBtn").onclick = async () => {
 };
 $("summaryRefresh").onclick = loadSummaries;
 $("summaryCatFilter").onchange = loadSummaries;
+$("reviewBtn").onclick = async () => {
+  const cat = $("summaryCatFilter").value;
+  const r = await fetch(`/api/review?category=${encodeURIComponent(cat)}`);
+  if (!r.ok) return setStatus("导出失败", cat ? "该分类暂无总结" : "服务不可用");
+  const text = await r.text();
+  if (!text.includes("### ")) return setStatus("暂无总结可导出，先点 AI 整理并保存");
+  downloadText(`复习册-${cat || "全部课程"}.md`, text, "text/markdown;charset=utf-8");
+  setStatus("复习册已导出", `${(text.match(/^### /gm) || []).length} 条总结`);
+};
 
 // ---- storage management ----
 const fmtSize = n => n > 1048576 ? (n/1048576).toFixed(1)+" MB" : n > 1024 ? (n/1024).toFixed(1)+" KB" : n+" B";

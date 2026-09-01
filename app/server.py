@@ -18,7 +18,7 @@ from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -887,6 +887,27 @@ def list_summaries(category: str = ""):
                             "created_at": s.get("created_at", ""),
                             "snippet": s.get("text", "")[:80]}
                            for s in sorted(items, key=lambda x: x.get("created_at", ""), reverse=True)]}
+
+
+@app.get("/api/review")
+def export_review(category: str = ""):
+    """One Markdown review booklet: every saved AI summary, optionally in a
+    single category. Finals prep: open the file and study."""
+    items = _load_json(SUMMARIES_FILE, {"summaries": []}).get("summaries", [])
+    if category:
+        items = [s for s in items if s.get("category") == category]
+        if not items:
+            raise HTTPException(404, "该分类暂无总结")
+    by_cat: dict = {}
+    for s in items:
+        by_cat.setdefault(s.get("category", "未分类"), []).append(s)
+    parts = ["# 期末复习册\n"]
+    for cat in sorted(by_cat):
+        parts.append(f"\n## {cat}\n")
+        for s in sorted(by_cat[cat], key=lambda x: x.get("created_at", "")):
+            parts.append(f"### {s.get('title', 'AI 整理')} · {s.get('created_at', '')[:10]}\n\n"
+                         f"{s.get('text', '')}\n")
+    return PlainTextResponse("\n".join(parts), media_type="text/markdown; charset=utf-8")
 
 
 @app.get("/api/summaries/{sid}")
