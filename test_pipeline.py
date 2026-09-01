@@ -56,7 +56,7 @@ assert all(m in page for m in ["实时字幕", "字幕桥", "问 AI", "导出 Ma
                                "saveDoc", "ankiBtn", "statsBtn", "本地 Ollama",
                                "分类管理", "AI 总结", "saveSummaryBtn",
                                "addCategoryBtn", "summaryList", "cleanTestBtn",
-                               "diskWarn", "bridgeDetail", "reviewBtn"])
+                               "diskWarn", "bridgeDetail", "reviewBtn", "quizBtn", "quizBox"])
 
 # --- real model paths ----------------------------------------------------
 assert post("/api/translate", {"text": "Our next lecture covers chapter five."})["text"]
@@ -101,7 +101,14 @@ captured = {}
 class MockAI(BaseHTTPRequestHandler):
     def do_POST(self):
         captured["prompt"] = json.loads(self.rfile.read(int(self.headers["Content-Length"])))["messages"][0]["content"]
-        out = json.dumps({"choices": [{"message": {"content": "x"}}]}).encode()
+        if "单选题" in captured["prompt"]:
+            content = ("Q1. What is the powerhouse of the cell?\nA) Nucleus\nB) Mitochondrion\n"
+                       "C) Ribosome\nD) Golgi\nANSWER: B\n\n"
+                       "Q2. Where does protein folding happen?\nA) ER\nB) Nucleus\nC) Cell wall\n"
+                       "D) Vacuole\nANSWER: A")
+        else:
+            content = "x"
+        out = json.dumps({"choices": [{"message": {"content": content}}]}).encode()
         self.send_response(200); self.send_header("Content-Length", str(len(out))); self.end_headers(); self.wfile.write(out)
     def log_message(self, *a): pass
 
@@ -114,6 +121,18 @@ post("/api/config", {"ai_base": f"http://host.docker.internal:{mock.server_addre
 post(f"/api/sessions/{gsid}/glossary", {"term": "Mitokondrio", "zh": "线粒体"})  # restore for injection
 post("/api/captions", {"text": f"The Mitokondrio produces energy {uuid.uuid4().hex[:6]} for the cell.", "offset": 88.0})
 assert "Mitokondrio=线粒体" in captured.get("prompt", ""), "glossary must reach the AI prompt"
+
+# --- quiz: multiple-choice self-test generated from saved summaries -------
+qmark = f"organelle marker {uuid.uuid4().hex[:6]}"
+qsum = post("/api/summaries", {"category": "QuizCat", "title": "Q",
+                                "text": f"Mitochondria are the powerhouse. {qmark}"})["id"]
+qz = post("/api/quiz", {"category": "QuizCat", "count": 5})
+assert qz["count"] == 2, qz
+assert qz["questions"][0]["answer"] == "B" and qz["questions"][0]["options"][1] == "Mitochondrion"
+assert qz["questions"][1]["answer"] == "A" and qz["questions"][1]["options"][0] == "ER"
+assert qz["model"] == "mock-model" and "单选题" in captured["prompt"] and qmark in captured["prompt"]
+expect(400, "/api/quiz", "POST", {"category": "EmptyQuizCat"})
+expect(200, f"/api/summaries/{qsum}", "DELETE")
 post("/api/config", old_cfg)
 mock.shutdown()
 
@@ -169,15 +188,21 @@ r1 = uuid.uuid4().hex[:6]
 sum_a = post("/api/summaries", {"category": "BookletA", "title": "L1", "text": f"alpha notes {r1}"})["id"]
 r2 = uuid.uuid4().hex[:6]
 sum_b = post("/api/summaries", {"category": "BookletB", "title": "L2", "text": f"beta notes {r2}"})["id"]
+rn = uuid.uuid4().hex[:6]
+nsid = post("/api/sessions", {"title": "NotesCourse", "category": "BookletA"})["id"]
+post(f"/api/sessions/{nsid}/notes", {"notes": f"hand notes {rn}"})
 md_a = urllib.request.urlopen(HOST + "/api/review?category=BookletA").read().decode()
 assert f"alpha notes {r1}" in md_a and f"beta notes {r2}" not in md_a and "## BookletA" in md_a
+assert f"hand notes {rn}" in md_a and "NotesCourse" in md_a and "### 我的笔记" in md_a
 md_all = urllib.request.urlopen(HOST + "/api/review").read().decode()
 assert f"alpha notes {r1}" in md_all and f"beta notes {r2}" in md_all
+assert f"hand notes {rn}" in md_all
 assert "## BookletA" in md_all and "## BookletB" in md_all
 assert md_all.startswith("# 期末复习册")
 expect(404, "/api/review?category=NopeNotFound")
 for s in (sum_a, sum_b):
     expect(200, f"/api/summaries/{s}", "DELETE")
+expect(200, f"/api/sessions/{nsid}", "DELETE")
 
 # --- bridge self-check (host-side diagnostics must pass) ------------------
 venv_py = os.path.join("bridge", ".venv", "Scripts", "python.exe")

@@ -13,6 +13,7 @@ import time
 import asyncio
 import logging
 import json
+import re
 import uuid
 from pathlib import Path
 
@@ -199,6 +200,11 @@ async def detect_models():
 
 class NotesReq(BaseModel):
     notes: str = ""
+
+
+class QuizReq(BaseModel):
+    category: str = ""   # empty = all saved summaries
+    count: int = 5
 
 
 class GlossaryReq(BaseModel):
@@ -891,23 +897,93 @@ def list_summaries(category: str = ""):
 
 @app.get("/api/review")
 def export_review(category: str = ""):
-    """One Markdown review booklet: every saved AI summary, optionally in a
-    single category. Finals prep: open the file and study."""
-    items = _load_json(SUMMARIES_FILE, {"summaries": []}).get("summaries", [])
+    """One Markdown review booklet: every saved AI summary plus each course's
+    student notes (grouped by the course's category), optionally in a single
+    category. Finals prep: open the file and study."""
+    sums = _load_json(SUMMARIES_FILE, {"summaries": []}).get("summaries", [])
+    notes_by_cat: dict = {}
+    for p in sorted(DATA_DIR.glob("session-*.json"), key=lambda x: x.stat().st_mtime):
+        try:
+            s = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        note = s.get("notes")
+        if not isinstance(note, str) or not note.strip():
+            continue
+        cat = s.get("category") or "未分类"
+        if not category or cat == category:
+            notes_by_cat.setdefault(cat, []).append(
+                (s.get("title", s.get("id", "未命名课程")), s.get("created_at", ""), note.strip()))
     if category:
-        items = [s for s in items if s.get("category") == category]
-        if not items:
-            raise HTTPException(404, "该分类暂无总结")
+        sums = [s for s in sums if s.get("category") == category]
+        if not sums and not notes_by_cat:
+            raise HTTPException(404, "该分类暂无总结或笔记")
     by_cat: dict = {}
-    for s in items:
+    for s in sums:
         by_cat.setdefault(s.get("category", "未分类"), []).append(s)
     parts = ["# 期末复习册\n"]
-    for cat in sorted(by_cat):
+    for cat in sorted(set(by_cat) | set(notes_by_cat)):
         parts.append(f"\n## {cat}\n")
-        for s in sorted(by_cat[cat], key=lambda x: x.get("created_at", "")):
+        for s in sorted(by_cat.get(cat, []), key=lambda x: x.get("created_at", "")):
             parts.append(f"### {s.get('title', 'AI 整理')} · {s.get('created_at', '')[:10]}\n\n"
                          f"{s.get('text', '')}\n")
+        notes = sorted(notes_by_cat.get(cat, []), key=lambda x: x[1])
+        if notes:
+            parts.append("\n### 我的笔记\n")
+            for title, created, note in notes:
+                parts.append(f"**{title} · {created[:10]}**\n\n{note}\n")
     return PlainTextResponse("\n".join(parts), media_type="text/markdown; charset=utf-8")
+
+
+MCQ_RE_Q = re.compile(r"^\s*(?:Q\s*)?(\d+)[\.、．\)]\s*(.+)$")
+MCQ_RE_OPT = re.compile(r"^\s*([A-D])[\)\.、．]\s*(.+)$")
+MCQ_RE_ANS = re.compile(r"^\s*(?:答案|ANSWER)\s*[:：]?\s*([A-D])\b", re.IGNORECASE)
+
+
+def _parse_quiz(text: str) -> list[dict]:
+    """Tolerant parser for the MCQ format the model is told to emit:
+    Q1. <stem> / A) <opt> ... / ANSWER: B. Returns {q, options, answer}."""
+    questions, cur, opts, ans = [], None, [], None
+    for ln in text.splitlines():
+        m = MCQ_RE_Q.match(ln)
+        if m:
+            if cur is not None and len(opts) >= 2:
+                questions.append({"q": cur, "options": opts, "answer": ans})
+            cur, opts, ans = m.group(2).strip(), [], None
+            continue
+        m = MCQ_RE_OPT.match(ln)
+        if m and cur is not None:
+            opts.append(m.group(2).strip())
+            continue
+        m = MCQ_RE_ANS.match(ln)
+        if m:
+            ans = m.group(1).upper()
+    if cur is not None and len(opts) >= 2:
+        questions.append({"q": cur, "options": opts, "answer": ans})
+    return questions
+
+
+@app.post("/api/quiz")
+async def quiz(req: QuizReq):
+    """Generate a multiple-choice self-test from the saved AI summaries
+    (optionally one category) and hand it back for on-page answering."""
+    count = max(3, min(req.count or 5, 10))
+    sums = _load_json(SUMMARIES_FILE, {"summaries": []}).get("summaries", [])
+    if req.category:
+        sums = [s for s in sums if s.get("category") == req.category]
+    if not sums:
+        raise HTTPException(400, "该分类暂无总结，请先保存 AI 总结")
+    content = cap_long_text("\n\n".join(s.get("text", "") for s in sums))
+    prompt = (f"根据下面的课程总结，出 {count} 道中文单选题，检验对内容的理解。"
+              "严格按这个格式输出（不要输出其他内容）：\n"
+              "Q1. <题干>\nA) <选项>\nB) <选项>\nC) <选项>\nD) <选项>\nANSWER: <A|B|C|D>\n\n"
+              f"课程总结：\n{content}")
+    try:
+        text, backend = await ai_complete(prompt)
+    except Exception as e:
+        raise HTTPException(502, f"quiz backend: {e}")
+    questions = _parse_quiz(text)
+    return {"questions": questions, "count": len(questions), "model": backend, "raw": text}
 
 
 @app.get("/api/summaries/{sid}")

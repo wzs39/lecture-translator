@@ -176,8 +176,10 @@
     <select id="summaryCatFilter"><option value="">全部总结</option></select>
     <button id="summaryRefresh" class="ghost">刷新</button>
     <button id="reviewBtn" class="ghost">📖 导出复习册</button>
+    <button id="quizBtn" class="ghost">📝 自测</button>
   </div>
   <div id="summaryList" style="margin-top:6px;font-size:13px"></div>
+  <div id="quizBox" style="margin-top:8px;font-size:13px"></div>
   <div class="row" style="margin-top:12px">
     <input id="searchQ" placeholder="跨课程搜索关键词…" style="min-width:220px">
     <button id="searchBtn" class="ghost">搜索</button>
@@ -530,14 +532,63 @@ $("saveSummaryBtn").onclick = async () => {
 };
 $("summaryRefresh").onclick = loadSummaries;
 $("summaryCatFilter").onchange = loadSummaries;
+const QIDX = "ABCD";
+function renderQuiz(j, cat) {
+  const box = $("quizBox");
+  if (!j.questions.length) {
+    box.innerHTML = `<div><b>没有解析出选择题</b>（模型 ${escapeHtml(j.model)}）——完整原文如下：</div>`
+      + `<pre style="white-space:pre-wrap;margin:6px 0;color:var(--dim)">${escapeHtml(j.raw)}</pre>`;
+    return setStatus("自测未解析", "见原始输出");
+  }
+  const cards = j.questions.map((q, i) => {
+    const aIdx = QIDX.indexOf(q.answer || "");
+    return `<div style="margin:10px 0;padding:8px 10px;background:#111a26;border-radius:8px">`
+      + `<div><b>${i + 1}. ${escapeHtml(q.q)}</b></div>`
+      + q.options.map((o, k) => `<label style="display:block;margin:2px 0;cursor:pointer">`
+          + `<input type="radio" name="qz${i}" value="${k}"> ${QIDX[k]}) ${escapeHtml(o)}</label>`).join("")
+      + `<div class="qza" style="color:var(--dim);display:none;margin-top:4px">✅ 正确答案：${escapeHtml(q.answer || "?")}${aIdx >= 0 ? "）" + escapeHtml(q.options[aIdx] || "") : ""}</div></div>`;
+  }).join("");
+  box.innerHTML = `<div><b>📝 自测 · ${escapeHtml(cat || "全部课程")}</b>`
+    + `（${j.questions.length} 题 · ${escapeHtml(j.model)}）`
+    + ` <button id="quizSubmit" class="ghost" style="padding:4px 12px">提交</button>`
+    + ` <span id="quizScore" style="color:var(--dim)"></span></div>${cards}`;
+  $("quizSubmit").onclick = () => {
+    let right = 0;
+    j.questions.forEach((q, i) => {
+      const aIdx = QIDX.indexOf(q.answer || "");
+      const chosen = box.querySelector(`input[name="qz${i}"]:checked`);
+      box.querySelectorAll(`input[name="qz${i}"]`).forEach(inp => inp.disabled = true);
+      if (chosen && Number(chosen.value) === aIdx) {
+        right++;
+        chosen.parentElement.style.color = "#6fe38b";
+      } else if (chosen) chosen.parentElement.style.color = "#ff7b7b";
+      if (aIdx >= 0) box.querySelector(`input[name="qz${i}"][value="${aIdx}"]`).parentElement.style.color = "#6fe38b";
+    });
+    box.querySelectorAll(".qza").forEach(el => el.style.display = "block");
+    $("quizScore").textContent = `得分 ${right}/${j.questions.length}`;
+  };
+}
+$("quizBtn").onclick = async () => {
+  const cat = $("summaryCatFilter").value;
+  setStatus("生成自测题...");
+  try {
+    const r = await fetch("/api/quiz", {method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({category: cat, count: 5})});
+    const j = await r.json();
+    if (!r.ok) return setStatus("自测生成失败", j.detail || `HTTP ${r.status}`);
+    renderQuiz(j, cat);
+    setStatus("自测已生成", `${j.count} 题`);
+  } catch (e) { setStatus("自测生成失败", e.message); }
+};
+
 $("reviewBtn").onclick = async () => {
   const cat = $("summaryCatFilter").value;
   const r = await fetch(`/api/review?category=${encodeURIComponent(cat)}`);
   if (!r.ok) return setStatus("导出失败", cat ? "该分类暂无总结" : "服务不可用");
   const text = await r.text();
-  if (!text.includes("### ")) return setStatus("暂无总结可导出，先点 AI 整理并保存");
+  if (!text.includes("### ")) return setStatus("暂无总结或笔记可导出");
   downloadText(`复习册-${cat || "全部课程"}.md`, text, "text/markdown;charset=utf-8");
-  setStatus("复习册已导出", `${(text.match(/^### /gm) || []).length} 条总结`);
+  setStatus("复习册已导出", `${(text.match(/^### .* · /gm) || []).length} 条总结${text.includes("我的笔记") ? " + 课程笔记" : ""}`);
 };
 
 // ---- storage management ----
