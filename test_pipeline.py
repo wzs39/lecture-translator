@@ -1,4 +1,5 @@
 import json, struct, math, threading, urllib.request, urllib.error
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 HOST = "http://localhost:8000"
 
@@ -54,4 +55,35 @@ try:
     raise SystemExit("deleted session should 404")
 except urllib.error.HTTPError as e:
     assert e.code == 404
+
+# ---- glossary: extraction persists, manual add/remove, prompt injection ----
+old_cfg = get_json("/api/config")
+gsid = post_json("/api/sessions", {"title": "Glossary"})["id"]
+post_json(f"/api/sessions/{gsid}/activate")
+post_json("/api/terms", {"text": "Photosynthesis converts light energy into chemical energy. Chloroplasts contain chlorophyll."})
+glossary = get_json(f"/api/sessions/{gsid}")["glossary"]
+assert "Photosynthesis" in glossary, "extraction must feed the glossary"
+g2 = post_json(f"/api/sessions/{gsid}/glossary", {"term": "Mitokondrio", "zh": "线粒体"})["glossary"]
+assert g2["Mitokondrio"] == "线粒体"
+req = urllib.request.Request(HOST + f"/api/sessions/{gsid}/glossary?term=Mitokondrio", method="DELETE")
+assert "Mitokondrio" not in json.load(urllib.request.urlopen(req, timeout=30))["glossary"]
+post_json(f"/api/sessions/{gsid}/glossary", {"term": "Mitokondrio", "zh": "线粒体"})  # restore for injection check
+
+# prompt injection, verified against a local mock OpenAI-compatible server
+captured = {}
+class MockAI(BaseHTTPRequestHandler):
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        captured["prompt"] = json.loads(body)["messages"][0]["content"]
+        out = json.dumps({"choices": [{"message": {"content": "线粒体是细胞的能量工厂。"}}]}).encode()
+        self.send_response(200); self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(out))); self.end_headers(); self.wfile.write(out)
+    def log_message(self, *a): pass
+mock = HTTPServer(("127.0.0.1", 0), MockAI)
+threading.Thread(target=mock.serve_forever, daemon=True).start()
+mock_port = mock.server_address[1]
+post_json("/api/config", {"ai_base": f"http://host.docker.internal:{mock_port}/v1", "ai_key": "test", "ai_model": "mock-model"})
+post_json("/api/captions", {"text": "The Mitokondrio produces energy for the cell.", "offset": 88.0})
+assert "Mitokondrio=线粒体" in captured.get("prompt", ""), f"glossary not injected: {captured.get('prompt','')[:200]}"
+post_json("/api/config", {"ai_base": old_cfg["ai_base"], "ai_key": old_cfg["ai_key"], "ai_model": old_cfg["ai_model"]})
 print("lecture translator contract: passed")

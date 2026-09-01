@@ -66,7 +66,7 @@ class ConfigReq(BaseModel):
     url: str = ""
     model: str = ""
     ai_base: str = ""
-    ai_key: str = ""
+    ai_key: str | None = None  # None = unchanged; "" = clear
     ai_model: str = ""
     deepseek_key: str = ""  # legacy field name, merged into ai_key
 
@@ -84,13 +84,12 @@ def set_config(req: ConfigReq):
         CONFIG["model"] = req.model.strip()
     if req.ai_base.strip():
         CONFIG["ai_base"] = req.ai_base.strip().rstrip("/")
-    if req.ai_key.strip():
+    if req.ai_key is not None:  # explicit empty string clears the key
         CONFIG["ai_key"] = req.ai_key.strip()
     if req.ai_model.strip():
         CONFIG["ai_model"] = req.ai_model.strip()
     if req.deepseek_key.strip():  # legacy clients
         CONFIG["ai_key"] = req.deepseek_key.strip()
-        CONFIG.setdefault("ai_base", CONFIG["ai_base"])
     return {k: CONFIG[k] for k in ("url", "model", "ai_base", "ai_key", "ai_model")}
 
 
@@ -151,6 +150,53 @@ class NotesReq(BaseModel):
     notes: str = ""
 
 
+class GlossaryReq(BaseModel):
+    term: str
+    zh: str
+
+
+@app.post("/api/sessions/{sid}/glossary")
+def add_glossary_entry(sid: str, req: GlossaryReq):
+    if not req.term.strip() or not req.zh.strip():
+        raise HTTPException(400, "term and zh are required")
+    path = _session_path(sid)
+    session = json.loads(path.read_text(encoding="utf-8"))
+    glossary = session.setdefault("glossary", {})
+    glossary[req.term.strip()] = req.zh.strip()
+    path.write_text(json.dumps(session, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"glossary": glossary}
+
+
+@app.delete("/api/sessions/{sid}/glossary")
+def remove_glossary_entry(sid: str, term: str = ""):
+    path = _session_path(sid)
+    session = json.loads(path.read_text(encoding="utf-8"))
+    session.setdefault("glossary", {}).pop(term, None)
+    path.write_text(json.dumps(session, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"glossary": session.get("glossary", {})}
+
+
+def _active_glossary() -> dict:
+    sid = ACTIVE_SESSION["id"]
+    if not sid:
+        return {}
+    try:
+        s = json.loads((DATA_DIR / f"session-{sid}.json").read_text(encoding="utf-8"))
+        g = s.get("glossary", {})
+        return g if isinstance(g, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _glossary_block() -> str:
+    """Short prompt fragment (≤50 lines) forcing consistent term renderings."""
+    g = _active_glossary()
+    if not g:
+        return ""
+    lines = "\n".join(f"{t}={zh}" for t, zh in list(g.items())[:50])
+    return f"\nCourse glossary (use these EXACT renderings):\n{lines}\n"
+
+
 @app.post("/api/sessions/{sid}/notes")
 def save_session_notes(sid: str, req: NotesReq):
     """Save the student's own notes; AI output never overwrites them."""
@@ -199,7 +245,8 @@ async def ask(req: AskReq):
     if len(context) > ASK_CONTEXT_CHARS:  # recent window, not the whole lecture
         context = "[...较早内容省略...]" + context[-ASK_CONTEXT_CHARS:]
     prompt = ("只根据下面的课堂原文回答问题。无法从原文确定时明确说不知道，禁止编造。"
-              f"用{req.target}回答，并引用相关原文。\n问题：{req.question}\n课堂原文：{context}")
+              f"用{req.target}回答，并引用相关原文。\n问题：{req.question}\n课堂原文：{context}"
+              + _glossary_block())
     try:
         text, backend = await ai_complete(prompt)
         return {"text": text, "model": backend}
@@ -211,7 +258,7 @@ async def ask(req: AskReq):
 def create_session(req: SessionReq):
     sid = uuid.uuid4().hex
     path = DATA_DIR / f"session-{sid}.json"
-    path.write_text(json.dumps({"id": sid, "title": req.title.strip() or "Untitled lecture", "language": req.language, "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "transcript": [], "notes": "", "terms": []}, ensure_ascii=False, indent=2), encoding="utf-8")
+    path.write_text(json.dumps({"id": sid, "title": req.title.strip() or "Untitled lecture", "language": req.language, "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "transcript": [], "notes": "", "glossary": {}, "terms": []}, ensure_ascii=False, indent=2), encoding="utf-8")
     return json.loads(path.read_text(encoding="utf-8"))
 
 
@@ -275,6 +322,19 @@ async def terms(req: OrganizeReq):
         if isinstance(terms, dict):
             terms = [terms]
         terms = [t for t in terms if isinstance(t, dict) and t.get("term")]
+        # extraction feeds the course glossary so future translations in
+        # this course render the same terms identically
+        sid = ACTIVE_SESSION["id"]
+        if sid and terms:
+            try:
+                spath = _session_path(sid)
+                session = json.loads(spath.read_text(encoding="utf-8"))
+                glossary = session.setdefault("glossary", {})
+                for t in terms:
+                    glossary.setdefault(t["term"], (t.get("explanation") or "").strip())
+                spath.write_text(json.dumps(session, ensure_ascii=False, indent=2), encoding="utf-8")
+            except (OSError, json.JSONDecodeError):
+                log.warning("glossary merge failed for session %s", sid)
         return {"terms": terms}
     except Exception as e:
         raise HTTPException(502, f"terms backend: {e}")
@@ -350,7 +410,7 @@ async def organize(req: OrganizeReq):
     prompt = (
         f"整理以下讲座原文，输出{req.target}的结构化笔记。保留专业术语和关键事实，"
         "不要编造内容。输出：1.核心要点 2.术语 3.待确认问题。只输出整理结果。\n\n"
-        + cap_long_text(req.text)
+        + cap_long_text(req.text) + _glossary_block()
     )
     try:
         text, backend = await ai_complete(prompt)
@@ -426,6 +486,7 @@ async def translate_text(text: str, target: str, context: str = "") -> tuple[str
             "word-for-word; keep technical terms accurate and may keep the "
             "original term in parentheses on first mention; preserve names, "
             "numbers and formulas; omit nothing; output ONLY the translation."
+            + _glossary_block()
         )
         ai_task = asyncio.create_task(ai_complete(prompt, timeout_s=10))
         if mt_text is None:  # nothing fast yet: give the AI a real chance
@@ -455,6 +516,7 @@ async def translate_text(text: str, target: str, context: str = "") -> tuple[str
         "Rules: preserve names, numbers, formulas, citations, and technical terms; "
         "translate naturally as a professional lecture interpreter, not word-for-word; "
         "do not add explanations or omit information; output ONLY the translation."
+        + _glossary_block()
     )
     try:
         async with httpx.AsyncClient(timeout=60) as cx:
