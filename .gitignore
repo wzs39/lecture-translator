@@ -1,6 +1,11 @@
 __pycache__/
 *.pyc
 
+# bridge runtime cache (captions journal + confirmed-sent marker)
+bridge/captions-journal.jsonl
+bridge/captions-journal.sent
+bridge/.venv/
+
 # runtime data (recordings/session data live in Docker volumes)
 data/
 recordings/
