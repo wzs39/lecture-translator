@@ -29,10 +29,27 @@ log = logging.getLogger("lt")
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://ollama:11434")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen3:4b")
 CONFIG = {"url": OLLAMA_URL, "model": OLLAMA_MODEL,
-          "ai_base": "https://api.deepseek.com", "ai_key": "", "ai_model": "deepseek-chat"}
+          "ai_base": "https://api.deepseek.com", "ai_key": "", "ai_model": "deepseek-chat",
+          "access_token": os.environ.get("ACCESS_TOKEN", "")}
+
+
+app = FastAPI(title="lecture-translator")
+
+
+@app.middleware("http")
+async def access_control(request, call_next):
+    """When an access token is configured (set ACCESS_TOKEN env or via
+    /api/config), every /api/* request must carry it — header or query —
+    so the page can be shared beyond localhost without exposing it."""
+    token = CONFIG["access_token"]
+    if token and request.url.path.startswith("/api/"):
+        supplied = request.headers.get("x-access-token") or request.query_params.get("token")
+        if supplied != token:
+            from fastapi.responses import JSONResponse
+            return JSONResponse({"detail": "unauthorized"}, status_code=401)
+    return await call_next(request)
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/srv/data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
-app = FastAPI(title="lecture-translator")
 
 # Live-captions text source: rolling buffer the page polls, plus the session
 # new segments are persisted into.
@@ -70,11 +87,31 @@ class ConfigReq(BaseModel):
     ai_key: str | None = None  # None = unchanged; "" = clear
     ai_model: str = ""
     deepseek_key: str = ""  # legacy field name, merged into ai_key
+    access_token: str | None = None  # None = unchanged; "" = clear
 
 
 @app.get("/api/config")
 def get_config():
     return {k: CONFIG[k] for k in ("url", "model", "ai_base", "ai_key", "ai_model")}
+
+
+@app.get("/api/stats")
+def stats():
+    """Per-course study statistics."""
+    out = []
+    for p in DATA_DIR.glob("session-*.json"):
+        try:
+            s = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        tr = s.get("transcript", [])
+        out.append({"title": s.get("title", ""), "created": s.get("created_at", ""),
+                    "segments": len(tr),
+                    "words": sum(len(t.get("text", "").split()) for t in tr),
+                    "minutes": round(max((t.get("offset") or 0) for t in tr), 1) / 60 if tr else 0,
+                    "terms": len(s.get("glossary", {}) or {}),
+                    "notes": len(s.get("notes") or "")})
+    return {"courses": sorted(out, key=lambda x: x["created"], reverse=True)}
 
 
 @app.post("/api/config")
@@ -91,6 +128,8 @@ def set_config(req: ConfigReq):
         CONFIG["ai_model"] = req.ai_model.strip()
     if req.deepseek_key.strip():  # legacy clients
         CONFIG["ai_key"] = req.deepseek_key.strip()
+    if req.access_token is not None:  # explicit empty string clears it
+        CONFIG["access_token"] = req.access_token.strip()
     return {k: CONFIG[k] for k in ("url", "model", "ai_base", "ai_key", "ai_model")}
 
 
@@ -132,16 +171,21 @@ def cap_long_text(text):
 @app.get("/api/ai/detect")
 async def detect_models():
     """Auto-detect available models from the configured cloud AI service."""
-    if not CONFIG["ai_key"]:
-        raise HTTPException(400, "请先填写 API Key")
+    if not CONFIG["ai_key"].strip():
+        raise HTTPException(status_code=400, detail="请先填写云端 AI API Key")
+    if not CONFIG["ai_base"].strip():
+        raise HTTPException(status_code=400, detail="请先填写云端 AI 接口地址")
     try:
         async with httpx.AsyncClient(timeout=10) as cx:
             r = await cx.get(f"{CONFIG['ai_base']}/models",
                              headers={"Authorization": f"Bearer {CONFIG['ai_key']}"})
             r.raise_for_status()
             ids = [m.get("id") for m in r.json().get("data", []) if m.get("id")]
-    except Exception as e:
-        raise HTTPException(502, f"识别失败（检查接口地址和 Key）：{e}")
+    except httpx.HTTPStatusError as e:
+        detail = f"模型列表请求失败：HTTP {e.response.status_code}"
+        raise HTTPException(status_code=401 if e.response.status_code in (401, 403) else 502, detail=detail)
+    except (httpx.RequestError, ValueError, KeyError) as e:
+        raise HTTPException(status_code=502, detail=f"识别失败（检查接口地址和 Key）：{e}")
     prefer = ("chat", "flash", "mini", "turbo", "air")
     suggested = next((i for i in ids if any(k in i.lower() for k in prefer)), ids[0] if ids else "")
     return {"models": ids, "suggested": suggested, "count": len(ids)}

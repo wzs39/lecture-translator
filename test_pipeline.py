@@ -11,8 +11,9 @@ def get_json(path):
     return json.load(urllib.request.urlopen(HOST + path, timeout=180))
 
 assert get_json("/api/self-check")["ready"]
-assert all(marker in urllib.request.urlopen(HOST + "/").read().decode() for marker in
-           ["实时字幕", "字幕桥", "问 AI", "AI整理（保留原文）", "导出 Markdown"])
+page = urllib.request.urlopen(HOST + "/").read().decode()
+assert all(marker in page for marker in
+           ["实时字幕", "字幕桥", "问 AI", "AI整理（保留原文）", "导出 Markdown", "saveDoc", "ankiBtn", "statsBtn"])
 assert post_json("/api/translate", {"text": "Our next lecture covers chapter five."})["text"]
 assert isinstance(post_json("/api/terms", {"text": "Photosynthesis converts light energy."})["terms"], list)
 
@@ -96,4 +97,16 @@ post_json(f"/api/sessions/{sid2}/activate")
 post_json("/api/captions", {"text": f"The hunchback {marker} rang the bell.", "offset": 5.0})
 hits = get_json(f"/api/search?q={urllib.parse.quote(marker)}")["hits"]
 assert any(h["text"] == f"The hunchback {marker} rang the bell." and h["session"] == "Search" for h in hits)
+# Study statistics is a real read path for persisted courses.
+stats = get_json("/api/stats")
+assert any(x["title"] == "Search" and x["segments"] >= 1 for x in stats["courses"])
+
+# Model detection: missing key is a client error, invalid credentials are auth errors.
+post_json("/api/config", {"ai_key": "", "ai_base": "http://127.0.0.1:9"})
+try:
+    get_json("/api/ai/detect")
+    raise SystemExit("missing API key should 400")
+except urllib.error.HTTPError as e:
+    assert e.code == 400 and "API Key" in e.read().decode()
+
 print("lecture translator contract: passed")

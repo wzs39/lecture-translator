@@ -86,6 +86,7 @@
       <div class="row" style="margin-bottom:10px">
         <button id="saveTranscript" class="ghost">💾 保存翻译记录</button>
         <button id="saveSrt" class="ghost">导出 SRT 字幕</button>
+        <button id="saveDoc" class="ghost">导出 Word</button>
         <span style="color:var(--dim);font-size:12px">当前课程全部原文+翻译</span>
       </div>
       <div id="subs"></div>
@@ -116,6 +117,7 @@
         <input id="gTerm" placeholder="术语，如 Mitokondrio" style="min-width:170px">
         <input id="gZh" placeholder="译名/解释，如 线粒体" style="min-width:150px">
         <button id="gAdd" class="ghost">添加</button>
+        <button id="ankiBtn" class="ghost">导出 Anki CSV</button>
       </div>
     </div>
   </div>
@@ -154,8 +156,10 @@
   <div class="row" style="margin-top:12px">
     <input id="searchQ" placeholder="跨课程搜索关键词…" style="min-width:220px">
     <button id="searchBtn" class="ghost">搜索</button>
+    <button id="statsBtn" class="ghost">学习统计</button>
   </div>
   <div id="searchResults" style="margin-top:8px;font-size:13px"></div>
+  <div id="statsTable" style="margin-top:8px;font-size:13px"></div>
 </div>
 
 <div id="subs"></div>
@@ -163,6 +167,17 @@
 
 <script>
 const $ = id => document.getElementById(id);
+// access token (if configured): ?token=... in the URL is remembered, then
+// injected into every /api request so shared links work beyond localhost
+const LT_TOKEN = new URLSearchParams(location.search).get("token") || localStorage.getItem("lt_token") || "";
+if (new URLSearchParams(location.search).get("token")) localStorage.setItem("lt_token", LT_TOKEN);
+const _origFetch = window.fetch.bind(window);
+window.fetch = (input, init = {}) => {
+  const url = typeof input === "string" ? input : input.url;
+  if (LT_TOKEN && String(url).includes("/api/"))
+    init = {...init, headers: {...(init.headers || {}), "X-Access-Token": LT_TOKEN}};
+  return _origFetch(input, init);
+};
 let original = [], lines = [], sessionId = null, pollSince = null;
 
 function setStatus(s, extra="") { $("status").textContent = s + (extra?` · ${extra}`:""); }
@@ -286,15 +301,19 @@ $("saveConfig").onclick = async () => {
   if (!r.ok) return setStatus("config failed");
   const j = await r.json(); setStatus("config saved", j.model);
 };$( "detectBtn").onclick = async () => {
-  setStatus("detecting models...");
-  // save current fields first so the server detects what's on screen
-  await fetch("/api/config", {method:"POST", headers:{"Content-Type":"application/json"},
+  setStatus("检测模型中...");
+  const save = await fetch("/api/config", {method:"POST", headers:{"Content-Type":"application/json"},
     body:JSON.stringify({ai_base:$("aiBase").value, ai_key:$("aiKey").value, ai_model:$("aiModelName").value})});
+  if (!save.ok) { const e = await save.json().catch(()=>({})); return setStatus("配置保存失败", e.detail || "请检查输入"); }
   try {
     const r = await fetch("/api/ai/detect");
     const j = await r.json();
-    if (!r.ok) return setStatus("识别失败", j.detail || "");
-    if (j.suggested) $("aiModelName").value = j.suggested;
+    if (!r.ok) return setStatus("识别失败", j.detail || `HTTP ${r.status}`);
+    if (j.suggested) {
+      $("aiModelName").value = j.suggested;
+      const chosen = await fetch("/api/config", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ai_model:j.suggested})});
+      if (!chosen.ok) return setStatus("模型已识别，但保存失败");
+    }
     $("aiHint").textContent = `识别到 ${j.count} 个可用模型，已选用 ${j.suggested}。可用：${j.models.slice(0,6).join(", ")}${j.models.length>6?" ...":""}`;
     setStatus("models detected", `${j.count} 个`);
   } catch(e) { setStatus("detect failed: " + e.message); }
@@ -327,11 +346,45 @@ $("saveTranscript").onclick = async () => {
 };
 
 $( "saveAi").onclick = async () => {
-  setStatus("saving cloud AI...");
+  setStatus("保存云端 AI...");
   const r = await fetch("/api/config", {method:"POST", headers:{"Content-Type":"application/json"},
     body:JSON.stringify({ai_base:$("aiBase").value, ai_key:$("aiKey").value, ai_model:$("aiModelName").value})});
   if (!r.ok) return setStatus("cloud AI save failed");
   setStatus("cloud AI saved", $("aiModelName").value || "local only");
+};
+
+async function downloadTranscript() {
+  let transcript = lines;
+  if (sessionId) { try { const s = await (await fetch(`/api/sessions/${sessionId}`)).json(); if (s.transcript.length) transcript = s.transcript; } catch {} }
+  return transcript;
+}
+function downloadText(filename, text, type="text/plain;charset=utf-8") {
+  const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([text], {type}));
+  a.download = filename; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 0);
+}
+
+$("saveDoc").onclick = async () => {
+  const transcript = await downloadTranscript();
+  if (!transcript.length) return setStatus("暂无翻译内容");
+  const body = transcript.map(t => `${t.text}\n${t.zh ?? t.translation}`).join("\n\n");
+  downloadText("lecture-notes.doc", `<html><meta charset="utf-8"><body><h1>${escapeHtml($("sessionTitle").value || "Lecture")}</h1><pre>${escapeHtml(body)}</pre></body></html>", "application/msword");
+  setStatus("Word 已导出", `${transcript.length} 段`);
+};
+
+$("ankiBtn").onclick = async () => {
+  if (!sessionId) return setStatus("请先新建课程");
+  const s = await (await fetch(`/api/sessions/${sessionId}`)).json();
+  const entries = Object.entries(s.glossary || {});
+  if (!entries.length) return setStatus("暂无术语可导出");
+  const csv = ["Term,Translation", ...entries.map(([a,b]) => `"${a.replaceAll('"','""')}","${b.replaceAll('"','""')}"`)].join("\n");
+  downloadText("lecture-glossary-anki.csv", "\\ufeff" + csv, "text/csv;charset=utf-8");
+  setStatus("Anki CSV 已导出", `${entries.length} 个术语`);
+};
+
+$("statsBtn").onclick = async () => {
+  const r = await fetch("/api/stats"); const j = await r.json();
+  $("statsTable").innerHTML = j.courses.length ? j.courses.map(x => `<div style="margin:4px 0"><b>${escapeHtml(x.title)}</b> · ${x.segments} 段 · ${x.words} 词 · ${x.minutes.toFixed(1)} 分钟 · ${x.terms} 个术语 · 笔记 ${x.notes} 字</div>`).join("") : `<span style="color:var(--dim)">暂无学习统计</span>`;
+  setStatus("统计已更新", `${j.courses.length} 门课程`);
 };
 
 $( "saveSrt").onclick = async () => {
