@@ -25,11 +25,7 @@
           border-radius:0 10px 10px 0; margin-bottom:10px; }
   .line .orig { color:var(--dim); font-size:13px; margin-bottom:2px; }
   .line .zh { font-size:17px; }
-  .float { position:fixed; left:50%; transform:translateX(-50%); bottom:26px;
-           max-width:92vw; background:rgba(8,14,22,.92); border:1px solid #22344d;
-           border-radius:14px; padding:12px 18px; font-size:18px; text-align:center;
-           box-shadow:0 8px 30px rgba(0,0,0,.5); display:none; }
-  .float .orig { color:var(--dim); font-size:13px; }
+  .line.ai { border-left-color:#b78bff; }
   #hud { position:fixed; right:18px; top:18px; color:var(--dim); font-size:12px;
          background:rgba(8,14,22,.85); border:1px solid #22344d; border-radius:10px; padding:8px 12px; }
 </style>
@@ -72,6 +68,7 @@
     <button id="organizeBtn" class="ghost">✨ AI整理（保留原文）</button>
     <button id="exportBtn" class="ghost">导出 Markdown</button>
   </div>
+  <div id="aiOut"></div>
 </div>
 
 <div class="section">
@@ -84,7 +81,6 @@
 </div>
 
 <div id="subs"></div>
-<div class="float" id="float"><div class="orig" id="fOrig"></div><div id="fZh"></div></div>
 <div id="hud"></div>
 
 <script>
@@ -95,14 +91,19 @@ function setStatus(s, extra="") { $("status").textContent = s + (extra?` · ${ex
 function escapeHtml(s){return (s||"").replace(/[&<>"']/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));}
 const fmtTs = s => `${String(Math.floor(s/60)).padStart(2,"0")}:${String(Math.round(s%60)).padStart(2,"0")}`;
 
-function addLine(orig, zh, offset) {
+function addLine(orig, zh, offset) {  // captions only — AI answers go to #aiOut
   const ts = offset != null ? `${fmtTs(offset)} · ` : "";
   const d = document.createElement("div"); d.className = "line";
   d.innerHTML = `<div class="orig">${ts}${escapeHtml(orig)}</div><div class="zh">${escapeHtml(zh)}</div>`;
   $("subs").prepend(d);
   while ($("subs").children.length > 60) $("subs").lastChild.remove();
-  $("fOrig").textContent = orig; $("fZh").textContent = zh;
-  $("float").style.display = "block";
+}
+
+function addAiCard(title, text) {
+  const d = document.createElement("div"); d.className = "line ai";
+  d.innerHTML = `<div class="orig">${escapeHtml(title)}</div><div class="zh" style="white-space:pre-wrap">${escapeHtml(text)}</div>`;
+  $("aiOut").prepend(d);
+  while ($("aiOut").children.length > 20) $("aiOut").lastChild.remove();
 }
 
 // Poll the caption buffer the bridge feeds; ingest new lines as they land.
@@ -132,7 +133,7 @@ async function askAI() {
   if (!$("question").value.trim() || !original.length) return setStatus("需要问题和课堂原文");
   setStatus("asking AI...");
   const r = await fetch("/api/ask", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({question:$("question").value, context:original.join(" "), target:"Chinese (Simplified)"})});
-  const j = await r.json(); if (r.ok) addLine("AI回答", j.text, null); else setStatus("ask failed");
+  const j = await r.json(); if (r.ok) addAiCard("AI回答", j.text); else setStatus("ask failed");
 }
 
 async function extractTerms() {
@@ -140,7 +141,7 @@ async function extractTerms() {
   setStatus("extracting terms...");
   const r = await fetch("/api/terms", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({text:original.join(" "), target:"Chinese (Simplified)"})});
   const j = await r.json(); if (!r.ok) return setStatus("terms failed");
-  addLine("术语表", j.terms.map(x=>`${x.term}: ${x.explanation}`).join("\n"), null);
+  addAiCard("术语表", j.terms.map(x=>`${x.term}: ${x.explanation}`).join("\n"));
 }
 
 async function organize() {
@@ -148,7 +149,7 @@ async function organize() {
   setStatus("organizing with AI...");
   const r = await fetch("/api/organize", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({text:original.join(" "), target:"Chinese (Simplified)"})});
   const j = await r.json();
-  if (r.ok) addLine("AI整理（原文已保留）", j.text, null); else setStatus("organize failed");
+  if (r.ok) addAiCard("AI整理（原文已保留）", j.text); else setStatus("organize failed");
 }
 
 async function exportMarkdown() {
