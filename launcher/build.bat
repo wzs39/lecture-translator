@@ -8,7 +8,7 @@ if not exist "%CSC%" (
   echo csc.exe not found - .NET Framework 4.x is required.
   exit /b 1
 )
-"%CSC%" /nologo /target:winexe /codepage:65001 ^
+"%CSC%" /nologo /target:winexe /codepage:65001 /win32res:app.res ^
   /r:System.Windows.Forms.dll /r:System.Drawing.dll ^
   /out:..\LectureTranslatorLauncher.exe Launcher.cs
 if errorlevel 1 (

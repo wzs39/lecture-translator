@@ -11,6 +11,8 @@ using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Net;
+using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading;
 using System.Windows.Forms;
 
@@ -301,13 +303,50 @@ namespace LectureTranslator {
         AppDir, out outp);
     }
 
+    // ---- version output ----
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool AttachConsole(int dwProcessId);
+    [DllImport("kernel32.dll")]
+    private static extern bool FreeConsole();
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr GetStdHandle(int nStdHandle);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool WriteFile(IntPtr hFile, byte[] lpBuffer,
+      uint nNumberOfBytesToWrite, out uint lpNumberOfBytesWritten,
+      IntPtr lpOverlapped);
+
+    private static bool WriteConsole(string text) {
+      byte[] bytes = Encoding.ASCII.GetBytes(text + Environment.NewLine);
+      IntPtr h = GetStdHandle(-11); // STD_OUTPUT_HANDLE
+      uint written;
+      return h != IntPtr.Zero && h != new IntPtr(-1) &&
+        WriteFile(h, bytes, (uint)bytes.Length, out written, IntPtr.Zero);
+    }
+
+    private static void PrintVersion() {
+      string msg = "Lecture Translator Launcher " + LocalVersion();
+      if (!WriteConsole(msg)) {
+        // launched from Explorer (no console): show the version in a box
+        if (AttachConsole(-1)) { WriteConsole(msg); FreeConsole(); return; }
+        MessageBox.Show(msg, "Lecture Translator 启动器",
+          MessageBoxButtons.OK, MessageBoxIcon.Information);
+      }
+    }
+
     // ---- entry point ----
 
     [STAThread]
     public static void Main(string[] args) {
       bool selftest = false;
+      bool printVersion = false;
       foreach (string a in args) {
         if (a == "--selftest") { selftest = true; }
+        if (a == "--version") { printVersion = true; }
+      }
+      if (printVersion && !selftest) {
+        PrintVersion();
+        return;
       }
       if (selftest) {
         try {
