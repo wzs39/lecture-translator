@@ -308,6 +308,11 @@ async def push_caption(req: CaptionReq):
     }
     CAPTIONS.append(line)
     del CAPTIONS[:-500]  # keep the poll buffer bounded
+    try:  # durable cache: every incoming chunk survives even without a session
+        with (DATA_DIR / "captions-log.jsonl").open("a", encoding="utf-8") as f:
+            f.write(json.dumps(line, ensure_ascii=False) + "\n")
+    except OSError as e:
+        log.warning("captions log write failed: %s", e)
     sid = ACTIVE_SESSION["id"]
     if sid:
         try:

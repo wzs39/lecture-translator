@@ -19,9 +19,12 @@ Turn Live Captions on first: Win+Ctrl+L.
 """
 import argparse
 import difflib
+import json
 import re
 import sys
 import time
+from collections import deque
+from pathlib import Path
 
 import requests
 import uiautomation as uia
@@ -169,18 +172,84 @@ class Chunker:
         return text, off
 
 
-def post_chunk(url, text, offset):
-    try:
-        r = requests.post(f"{url}/api/captions",
-                          json={"text": text, "offset": offset}, timeout=90)
-        ok, line = r.ok, (r.json() if r.ok else {})
-    except Exception as e:
-        ok, line = False, {}
-        print(f"  backend unreachable: {e}")
-    shown = line.get("translation", "")
-    print(f"[{int(offset//60):02d}:{int(offset%60):02d}] {'OK' if ok else 'FAILED'} {text}")
-    if shown:
-        print(f"        -> {shown}")
+# ---- loss-prevention cache: write-ahead journal + confirmed-sent marker ----
+# Every chunk is appended to captions-journal.jsonl BEFORE sending. The count
+# of contiguously confirmed entries lives in captions-journal.sent; entries
+# past it are re-sent on startup (the server dedupes, so no double store).
+JOURNAL_PATH = Path(__file__).resolve().parent / "captions-journal.jsonl"
+SENT_PATH = JOURNAL_PATH.with_suffix(".sent")
+RETRY_EVERY = 5.0  # seconds between delivery retries while the backend is down
+
+
+def journal_append(text, offset):
+    with JOURNAL_PATH.open("a", encoding="utf-8") as f:
+        f.write(json.dumps({"text": text, "offset": offset}, ensure_ascii=False) + "\n")
+
+
+def journal_state():
+    """Returns (total_entries, confirmed_count)."""
+    total = 0
+    if JOURNAL_PATH.exists():
+        total = sum(1 for ln in JOURNAL_PATH.read_text(encoding="utf-8").splitlines() if ln.strip())
+    confirmed = 0
+    if SENT_PATH.exists():
+        try:
+            confirmed = min(total, int(SENT_PATH.read_text(encoding="utf-8").strip() or 0))
+        except ValueError:
+            confirmed = 0
+    return total, confirmed
+
+
+def mark_confirmed(n):
+    SENT_PATH.write_text(str(n), encoding="utf-8")
+
+
+class Delivery:
+    """In-order, at-least-once delivery with a durable backlog."""
+
+    def __init__(self, url):
+        self.url = url
+        self.unsent = deque()
+        total, confirmed = journal_state()
+        if JOURNAL_PATH.exists():
+            entries = [json.loads(ln) for ln in
+                       JOURNAL_PATH.read_text(encoding="utf-8").splitlines() if ln.strip()]
+            self.unsent.extend(entries[confirmed:])
+        self.last_try = 0.0
+
+    def submit(self, text, offset):
+        journal_append(text, offset)          # durable BEFORE sending
+        self.unsent.append({"text": text, "offset": offset})
+        self._try_deliver()
+
+    def retry_due(self, now):
+        return bool(self.unsent) and now - self.last_try >= RETRY_EVERY
+
+    def retry(self, now):
+        self.last_try = now
+        self._try_deliver()
+
+    def _try_deliver(self):
+        while self.unsent:
+            entry = self.unsent[0]
+            try:
+                r = requests.post(f"{self.url}/api/captions",
+                                  json={"text": entry["text"], "offset": entry["offset"]},
+                                  timeout=90)
+                ok = r.ok
+                line = r.json() if ok else {}
+            except Exception as e:
+                ok, line = False, {}
+                print(f"  backend unreachable ({e}); cached, will retry")
+            if not ok:
+                break  # keep order: stop at the first failure
+            shown = line.get("translation", "")
+            print(f"[{int(entry['offset']//60):02d}:{int(entry['offset']%60):02d}] OK {entry['text']}")
+            if shown:
+                print(f"        -> {shown}")
+            self.unsent.popleft()
+            total, _ = journal_state()
+            mark_confirmed(total - len(self.unsent))
 
 
 def main():
@@ -202,23 +271,29 @@ def main():
 
     tracker = SentenceTracker()
     chunker = Chunker()
+    delivery = Delivery(args.url)
+    pending = len(delivery.unsent)
+    if pending:
+        print(f"  resending {pending} cached chunk(s) from a previous run...")
     offset0 = time.monotonic()
     prev_text = ""
     while True:
         time.sleep(POLL_SEC)
         try:
+            now = time.monotonic()
             text = caption_text(win)
             if text != prev_text:
                 prev_text = text
-                now = time.monotonic()
                 for sentence in tracker.feed(text):
                     ready, chunk, off = chunker.add(sentence, round(now - offset0, 2), now)
                     if ready:
                         ctext, coff = chunker.flush()
-                        post_chunk(args.url, ctext, coff)
-            if chunker.due(time.monotonic()):  # speaker paused: flush the tail
+                        delivery.submit(ctext, coff)
+            if chunker.due(now):  # speaker paused: flush the tail
                 ctext, coff = chunker.flush()
-                post_chunk(args.url, ctext, coff)
+                delivery.submit(ctext, coff)
+            if delivery.retry_due(now):
+                delivery.retry(now)
         except Exception as e:
             # never let one bad poll kill the bridge
             print(f"  poll error: {e}")
