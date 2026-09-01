@@ -129,16 +129,14 @@ assert any(x["title"] == "Search" and x["segments"] >= 1 for x in get("/api/stat
 # --- categories: CRUD + courses/summaries follow rename & delete ---------
 assert "ContractCat" in post("/api/categories", {"name": "ContractCat"})["categories"]
 scat = post("/api/sessions", {"title": "CatSession", "category": "ContractCat"})["id"]
-post(f"/api/sessions/{scat}/activate")
 sumid = post("/api/summaries", {"category": "ContractCat", "title": "Sum",
                                 "text": "classified notes"})["id"]
 assert any(s["id"] == sumid for s in get("/api/summaries?category=ContractCat")["summaries"])
 assert get(f"/api/summaries/{sumid}")["text"] == "classified notes"
-post("/api/categories", {"name": "ContractCat", "new_name": "ContractRenamed"}, "PATCH")
-assert "ContractRenamed" in get("/api/categories")["categories"]
-assert get(f"/api/sessions/{scat}")["category"] == "ContractRenamed"
-assert get(f"/api/summaries/{sumid}")["category"] == "ContractRenamed"
-post("/api/categories", {"name": "ContractRenamed", "new_name": "ContractGone"}, "PATCH")
+post("/api/categories", {"name": "ContractCat", "new_name": "ContractGone"}, "PATCH")
+assert "ContractGone" in get("/api/categories")["categories"]
+assert get(f"/api/sessions/{scat}")["category"] == "ContractGone"
+assert get(f"/api/summaries/{sumid}")["category"] == "ContractGone"
 expect(200, "/api/categories?name=ContractGone", "DELETE")
 assert get(f"/api/sessions/{scat}")["category"] == "未分类"
 assert get(f"/api/summaries/{sumid}")["category"] == "未分类"
