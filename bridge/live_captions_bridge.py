@@ -20,6 +20,7 @@ Turn Live Captions on first: Win+Ctrl+L.
 import argparse
 import difflib
 import re
+import sys
 import time
 
 import requests
@@ -29,6 +30,11 @@ WINDOW_CLASS = "LiveCaptionsDesktopWindow"
 SENTENCE_RE = re.compile(r"[^.!?。！？]+[.!?。！？]+")
 PRIVATE_USE_RE = re.compile(r"[\ue000-\uf8ff]")
 POLL_SEC = 0.4
+
+# The caption window holds ~15-20 lines and recognition rewrites older ones;
+# the seen-set must cover all of them or old sentences get re-posted forever.
+SEEN_EXACT = 400   # exact-match lookback
+SEEN_SIM = 20      # fuzzy (rewrite) lookback
 
 
 def find_captions_window():
@@ -74,18 +80,19 @@ class SentenceTracker:
     """
 
     def __init__(self):
-        self.seen = []    # normalized posted sentences (bounded)
-        self.pending = ""  # incomplete tail of the last line
+        self.exact = set()  # normalized posted sentences (exact lookback)
+        self.order = []     # same, oldest-first, for the fuzzy lookback
+        self.pending = ""   # incomplete tail of the last line
 
     @staticmethod
     def _norm(s):
         return re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", s.lower())
 
     def _dup(self, n):
-        """True if n was already covered: exact, a substring of a longer
-        posted run, or a near-match of some window of one (recognition
-        corrections rewrite whole runs with punctuation/case changes)."""
-        for x in self.seen[-12:]:
+        if n in self.exact:
+            return True
+        # fuzzy pass only over recent entries: rewrites happen soon after
+        for x in self.order[-SEEN_SIM:]:
             if n in x or (x in n and len(x) > 25):
                 return True
             if len(x) >= len(n):
@@ -101,8 +108,9 @@ class SentenceTracker:
         n = self._norm(s)
         if len(n) < 4 or self._dup(n):
             return
-        self.seen.append(n)
-        del self.seen[:-40]
+        self.exact.add(n)
+        self.order.append(n)
+        del self.order[:-SEEN_EXACT]
         out.append(s.strip())
 
     def feed(self, text):
@@ -128,6 +136,9 @@ class SentenceTracker:
 
 
 def main():
+    # Live Captions translations contain Chinese; never crash on a GBK console.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(errors="replace")
     ap = argparse.ArgumentParser()
     ap.add_argument("--url", default="http://localhost:8000")
     args = ap.parse_args()
@@ -148,25 +159,25 @@ def main():
         time.sleep(POLL_SEC)
         try:
             text = caption_text(win)
+            if text != prev_text:
+                prev_text = text
+                for sentence in tracker.feed(text):
+                    offset = round(time.monotonic() - offset0, 2)
+                    try:
+                        r = requests.post(f"{args.url}/api/captions",
+                                          json={"text": sentence, "offset": offset}, timeout=90)
+                        ok, line = r.ok, (r.json() if r.ok else {})
+                    except Exception as e:
+                        ok, line = False, {}
+                        print(f"  backend unreachable: {e}")
+                    shown = line.get("translation", "")
+                    print(f"[{int(offset//60):02d}:{int(offset%60):02d}] {'OK' if ok else 'FAILED'} {sentence}")
+                    if shown:
+                        print(f"        -> {shown}")
         except Exception as e:
-            print(f"  window read failed ({e}); retrying...")
+            # never let one bad poll kill the bridge
+            print(f"  poll error: {e}")
             time.sleep(1)
-            continue
-        if text != prev_text:
-            prev_text = text
-            for sentence in tracker.feed(text):
-                offset = round(time.monotonic() - offset0, 2)
-                try:
-                    r = requests.post(f"{args.url}/api/captions",
-                                      json={"text": sentence, "offset": offset}, timeout=90)
-                    ok, line = r.ok, (r.json() if r.ok else {})
-                except Exception as e:
-                    ok, line = False, {}
-                    print(f"  backend unreachable: {e}")
-                shown = line.get("translation", "")
-                print(f"[{int(offset//60):02d}:{int(offset%60):02d}] {'OK' if ok else 'FAILED'} {sentence}")
-                if shown:
-                    print(f"        -> {shown}")
 
 
 if __name__ == "__main__":

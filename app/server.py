@@ -257,6 +257,11 @@ async def push_caption(req: CaptionReq):
     translate it, and store original + translation."""
     if not req.text.strip():
         raise HTTPException(400, "text is required")
+    # Second line of defense (the bridge dedupes too): a bridge restart
+    # re-flushes the caption window backlog verbatim — drop those repeats.
+    norm = "".join(ch for ch in req.text.lower() if ch.isalnum())
+    if any(norm == "".join(ch for ch in l["text"].lower() if ch.isalnum()) for l in CAPTIONS[-30:]):
+        return {"duplicate": True}
     translation = await translate_text(req.text.strip(), "Chinese (Simplified)")
     line = {
         "text": req.text.strip(),
