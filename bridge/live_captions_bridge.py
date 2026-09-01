@@ -43,7 +43,8 @@ SEEN_SIM = 20      # fuzzy (rewrite) lookback
 # translating, so subtitles read as continuous speech, not fragments.
 CHUNK_SENTS = 3
 CHUNK_CHARS = 280
-CHUNK_PAUSE = 6.0  # flush a partial chunk after this many seconds idle
+CHUNK_PAUSE = 6.0   # flush a partial chunk after this many seconds idle
+QUIET_FLUSH = 4.0   # buffer unchanged this long => speech stopped: emit the pending tail
 
 
 def find_captions_window():
@@ -141,6 +142,15 @@ class SentenceTracker:
         if self.pending and not lines:
             self._emit(self.pending, out)
             self.pending = ""
+        return out
+
+    def flush_pending(self):
+        """Emit the incomplete tail when speech stops: without new lines the
+        buffer never rolls, so the last sentence would wait forever."""
+        s, self.pending = self.pending, ""
+        out = []
+        if s:
+            self._emit(s, out)
         return out
 
 
@@ -277,6 +287,7 @@ def main():
         print(f"  resending {pending} cached chunk(s) from a previous run...")
     offset0 = time.monotonic()
     prev_text = ""
+    last_change = time.monotonic()
     try:
         while True:
             time.sleep(POLL_SEC)
@@ -285,7 +296,15 @@ def main():
                 text = caption_text(win)
                 if text != prev_text:
                     prev_text = text
+                    last_change = now
                     for sentence in tracker.feed(text):
+                        ready, chunk, off = chunker.add(sentence, round(now - offset0, 2), now)
+                        if ready:
+                            ctext, coff = chunker.flush()
+                            delivery.submit(ctext, coff)
+                elif now - last_change >= QUIET_FLUSH:  # speech stopped: the
+                    # tail sentence would otherwise sit in pending forever
+                    for sentence in tracker.flush_pending():
                         ready, chunk, off = chunker.add(sentence, round(now - offset0, 2), now)
                         if ready:
                             ctext, coff = chunker.flush()
