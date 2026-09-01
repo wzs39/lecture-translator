@@ -190,11 +190,21 @@ def append_segment(sid: str, req: SegmentReq):
 async def terms(req: OrganizeReq):
     if not req.text.strip():
         raise HTTPException(400, "text is required")
-    prompt = f"从以下讲座原文提取最多20个重要专业术语，输出JSON数组，每项包含term和explanation，使用{req.target}解释，不要编造：\n{req.text}"
+    # qwen in JSON mode stubbornly emits a single object, so ask for the
+    # object shape {"terms": [...]} instead of a bare array
+    prompt = (f"从以下讲座原文提取所有重要专业术语（最多20个）。"
+              f"输出一个JSON对象：{{\"terms\": [{{\"term\": \"英文术语\", \"explanation\": \"用{req.target}给出的中文解释\"}}]}}。"
+              f"每个术语都要包含，不要编造。\n原文：\n{req.text}")
     try:
         text, _ = await ai_complete(prompt, json_mode=True)
         value = json.loads(text)
-        return {"terms": value if isinstance(value, list) else []}
+        if isinstance(value, list):  # a bare array is fine too
+            value = {"terms": value}
+        terms = value.get("terms", []) if isinstance(value, dict) else []
+        if isinstance(terms, dict):
+            terms = [terms]
+        terms = [t for t in terms if isinstance(t, dict) and t.get("term")]
+        return {"terms": terms}
     except Exception as e:
         raise HTTPException(502, f"terms backend: {e}")
 
