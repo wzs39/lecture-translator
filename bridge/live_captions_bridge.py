@@ -1,9 +1,15 @@
 """
 Windows Live Captions bridge — runs on the host (not in Docker).
 
-Reads the Windows 11 Live Captions window text via UI Automation,
-stabilizes it into complete sentences, and POSTs each sentence to the
-translator backend (/api/captions), which translates and stores it.
+Reads the Windows 11 Live Captions window text via UI Automation, splits
+the rolling caption buffer into complete sentences, and POSTs each new
+sentence to the translator backend (/api/captions), which translates and
+stores it.
+
+Observed window behavior (Windows 11): the caption area is a single
+TextControl whose Name holds the whole rolling buffer and is rewritten as
+recognition corrects itself, so we track complete sentences by count
+rather than diffing strings.
 
 Usage:
     python live_captions_bridge.py [--url http://localhost:8000]
@@ -12,26 +18,27 @@ Requirements: pip install -r requirements.txt  (uiautomation, requests)
 Turn Live Captions on first: Win+Ctrl+L.
 """
 import argparse
+import difflib
+import re
 import time
 
 import requests
 import uiautomation as uia
 
-# Window titles seen across Windows versions/locales.
-TITLE_KEYWORDS = ["live captions", "实时字幕", "livecaptions", "live-captions", "字幕"]
-
-STABLE_MS = 900        # commit fragment after this much no-change time
-MIN_CHARS = 4          # don't commit tiny fragments
-MAX_CHARS = 300        # or unbounded run-ons
-POLL_SEC = 0.25
+WINDOW_CLASS = "LiveCaptionsDesktopWindow"
+SENTENCE_RE = re.compile(r"[^.!?。！？]+[.!?。！？]+")
+PRIVATE_USE_RE = re.compile(r"[\ue000-\uf8ff]")
+POLL_SEC = 0.4
 
 
 def find_captions_window():
     root = uia.GetRootControl()
     for win in root.GetChildren():
         try:
+            if win.ClassName == WINDOW_CLASS:
+                return win
             name = (win.Name or "").strip().lower()
-            if any(k in name for k in TITLE_KEYWORDS):
+            if "live captions" in name or "实时字幕" in name:
                 return win
         except Exception:
             continue
@@ -39,60 +46,85 @@ def find_captions_window():
 
 
 def caption_text(win):
-    """Join all Text descendants in tree order — the captions window keeps
-    a few lines; appending order is bottom-up so the diff gives the tail."""
-    return " ".join(p for p in walk(win) if p).strip()
-
-
-def walk(control):
-    stack = [control]
+    """Concatenate visible caption text, skipping UI glyphs and noise."""
+    parts = []
+    stack = [win]
     while stack:
         c = stack.pop(0)
         try:
             if c.ControlTypeName == "TextControl" and c.Name:
-                yield c.Name.strip()
+                t = c.Name.strip()
+                if t and not PRIVATE_USE_RE.search(t):
+                    parts.append(t)
             stack.extend(c.GetChildren())
         except Exception:
             continue
+    return " ".join(parts).strip()
 
 
-def tail_after(prev, cur):
-    """New text appended to the caption window since the last snapshot."""
-    if not cur:
-        return ""
-    if cur == prev:
-        return ""
-    if prev and cur.startswith(prev):
-        return cur[len(prev):].strip()
-    if prev and prev in cur:
-        return cur.split(prev, 1)[1].strip()
-    return cur  # window cleared or rewrote itself: treat everything as new
+class SentenceTracker:
+    """Emits each complete sentence in the rolling buffer exactly once.
 
-
-class Stabilizer:
-    """Accumulates caption fragments and commits complete sentences:
-    on sentence punctuation, on a pause in updates, or at MAX_CHARS."""
+    Real window behavior (measured): the caption area is one TextControl
+    whose Name holds a few rolling LINES separated by newlines; lines are
+    rewritten as recognition corrects itself, and the final line usually
+    lacks a trailing period until it rolls away. So we split per line,
+    dedupe by normalized text with a similarity guard (rewrites produce
+    near-duplicates), and flush an incomplete tail when it disappears.
+    """
 
     def __init__(self):
-        self.buf = ""
-        self.last_change = time.monotonic()
+        self.seen = []    # normalized posted sentences (bounded)
+        self.pending = ""  # incomplete tail of the last line
 
-    def feed(self, fragment):
-        now = time.monotonic()
-        sentence = None
-        if fragment:
-            self.buf += (" " if self.buf and not self.buf.endswith(("-", "'")) else "") + fragment
-            self.last_change = now
-        stable_for = (now - self.last_change) * 1000
-        if self.buf and (self.buf[-1] in ".!?。！？" or stable_for >= STABLE_MS or len(self.buf) >= MAX_CHARS):
-            if len(self.buf) >= MIN_CHARS or self.buf[-1] in ".!?。！？":
-                sentence = self.buf.strip()
-                self.buf = ""
-        return sentence
+    @staticmethod
+    def _norm(s):
+        return re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", s.lower())
 
-    def flush(self):
-        s, self.buf = self.buf.strip(), ""
-        return s or None
+    def _dup(self, n):
+        """True if n was already covered: exact, a substring of a longer
+        posted run, or a near-match of some window of one (recognition
+        corrections rewrite whole runs with punctuation/case changes)."""
+        for x in self.seen[-12:]:
+            if n in x or (x in n and len(x) > 25):
+                return True
+            if len(x) >= len(n):
+                step = max(1, (len(x) - len(n)) // 8 + 1)
+                for i in range(0, len(x) - len(n) + 1, step):
+                    if difflib.SequenceMatcher(None, n, x[i:i + len(n)]).ratio() > 0.88:
+                        return True
+            elif difflib.SequenceMatcher(None, n, x).ratio() > 0.88:
+                return True
+        return False
+
+    def _emit(self, s, out):
+        n = self._norm(s)
+        if len(n) < 4 or self._dup(n):
+            return
+        self.seen.append(n)
+        del self.seen[:-40]
+        out.append(s.strip())
+
+    def feed(self, text):
+        out = []
+        lines = [l.strip() for l in text.splitlines() if l.strip()]
+        for i, line in enumerate(lines):
+            for s in SENTENCE_RE.findall(line):
+                self._emit(s, out)
+            tail = SENTENCE_RE.split(line)[-1].strip()
+            if not tail:
+                continue
+            if i < len(lines) - 1:
+                self._emit(tail, out)  # rolled away without a period
+            else:
+                # growing tail of the live line: flush only if it vanished
+                if self.pending and self._norm(self.pending) not in self._norm(text):
+                    self._emit(self.pending, out)
+                self.pending = tail
+        if self.pending and not lines:
+            self._emit(self.pending, out)
+            self.pending = ""
+        return out
 
 
 def main():
@@ -109,38 +141,32 @@ def main():
             time.sleep(3)
     print(f"  found: '{win.Name}' — capturing (Ctrl+C to stop)")
 
+    tracker = SentenceTracker()
     offset0 = time.monotonic()
-    stab = Stabilizer()
-    prev = caption_text(win)
+    prev_text = ""
     while True:
         time.sleep(POLL_SEC)
         try:
-            cur = caption_text(win)
+            text = caption_text(win)
         except Exception as e:
             print(f"  window read failed ({e}); retrying...")
-            win = find_captions_window()
-            if win is None:
-                continue
-            prev = caption_text(win)
+            time.sleep(1)
             continue
-        fragment = tail_after(prev, cur)
-        prev = cur
-        sentence = stab.feed(fragment)
-        if not sentence:
-            continue
-        offset = round(time.monotonic() - offset0, 2)
-        try:
-            r = requests.post(f"{args.url}/api/captions",
-                              json={"text": sentence, "offset": offset}, timeout=90)
-            ok = r.ok
-            line = r.json() if ok else {}
-        except Exception as e:
-            ok, line = False, {}
-            print(f"  backend unreachable: {e}")
-        shown = line.get("translation", "")
-        print(f"[{int(offset//60):02d}:{int(offset%60):02d}] {'OK' if ok else 'FAILED'} {sentence}")
-        if shown:
-            print(f"        -> {shown}")
+        if text != prev_text:
+            prev_text = text
+            for sentence in tracker.feed(text):
+                offset = round(time.monotonic() - offset0, 2)
+                try:
+                    r = requests.post(f"{args.url}/api/captions",
+                                      json={"text": sentence, "offset": offset}, timeout=90)
+                    ok, line = r.ok, (r.json() if r.ok else {})
+                except Exception as e:
+                    ok, line = False, {}
+                    print(f"  backend unreachable: {e}")
+                shown = line.get("translation", "")
+                print(f"[{int(offset//60):02d}:{int(offset%60):02d}] {'OK' if ok else 'FAILED'} {sentence}")
+                if shown:
+                    print(f"        -> {shown}")
 
 
 if __name__ == "__main__":
