@@ -11,6 +11,7 @@ reads caption text via UI Automation and posts it here.
 import os
 import re
 import time
+import asyncio
 import logging
 import json
 import uuid
@@ -93,17 +94,17 @@ def set_config(req: ConfigReq):
     return {k: CONFIG[k] for k in ("url", "model", "ai_base", "ai_key", "ai_model")}
 
 
-async def ai_complete(prompt: str, json_mode: bool = False):
+async def ai_complete(prompt: str, json_mode: bool = False, timeout_s: int = 120):
     """AI Q&A backend: any OpenAI-compatible web AI when an API key is
     configured (DeepSeek, GLM-4-Flash free tier, Groq, OpenRouter, ...),
     local Ollama otherwise. Returns (text, backend)."""
     key = CONFIG["ai_key"]
     if key:
         try:
-            async with httpx.AsyncClient(timeout=120) as cx:
+            async with httpx.AsyncClient(timeout=timeout_s) as cx:
                 body = {"model": CONFIG["ai_model"],
                         "messages": [{"role": "user", "content": prompt}],
-                        "temperature": 0.3, "max_tokens": 1024, "stream": False}
+                        "temperature": 0.3, "max_tokens": 512, "stream": False}
                 if json_mode:
                     body["response_format"] = {"type": "json_object"}
                 r = await cx.post(f"{CONFIG['ai_base']}/chat/completions",
@@ -317,37 +318,56 @@ async def mymemory_translate(text: str, to: str) -> str:
         return out.strip()
 
 
+AI_TRANSLATE_GRACE = 2.5  # seconds machine translation waits for the AI version
+
+
 async def translate_text(text: str, target: str, context: str = "") -> tuple[str, str]:
     """Returns (translation, backend_used).
 
-    Quality order: cloud AI interpreter-style translation (natural spoken
-    output, context-aware) when an AI key is configured, then raw machine
-    translation (Google, MyMemory), then local Qwen."""
-    if CONFIG["ai_key"]:
-        try:
-            prompt = (
-                "You are a professional live interpreter for university lectures. "
-                f"Translate the current chunk into {target}.\n"
-                + (f"Previous chunk for context:\n{context}\n" if context else "")
-                + f"Current chunk:\n{text}\n"
-                "Rules: sound like a natural spoken lecture interpreter, never "
-                "word-for-word; keep technical terms accurate and may keep the "
-                "original term in parentheses on first mention; preserve names, "
-                "numbers and formulas; omit nothing; output ONLY the translation."
-            )
-            out, backend = await ai_complete(prompt)
-            if out:
-                return out, backend
-        except Exception as e:
-            log.warning("AI translation failed, trying machine translation: %s", e)
+    Speed strategy: machine translation (usually < 1.5 s) runs first; when
+    an AI key is configured the AI interpreter version races it in a
+    parallel task and wins if it lands within AI_TRANSLATE_GRACE seconds —
+    latency is bounded by machine translation, quality by the AI. Ollama
+    is the offline last resort."""
     to = CLOUD_TARGET.get(target, "zh-CN")
+    mt_text = None
     for cloud in (google_translate, mymemory_translate):
         try:
-            out = await cloud(text, to)
+            out = await asyncio.wait_for(cloud(text, to), timeout=4)
             if out:
-                return out, cloud.__name__
+                mt_text = out
+                break
         except Exception as e:
-            log.warning("%s failed, trying next backend: %s", cloud.__name__, e)
+            log.warning("%s failed: %s", cloud.__name__, e)
+
+    if CONFIG["ai_key"]:
+        prompt = (
+            "You are a professional live interpreter for university lectures. "
+            f"Translate the current chunk into {target}.\n"
+            + (f"Previous chunk for context:\n{context}\n" if context else "")
+            + f"Current chunk:\n{text}\n"
+            "Rules: sound like a natural spoken lecture interpreter, never "
+            "word-for-word; keep technical terms accurate and may keep the "
+            "original term in parentheses on first mention; preserve names, "
+            "numbers and formulas; omit nothing; output ONLY the translation."
+        )
+        ai_task = asyncio.create_task(ai_complete(prompt, timeout_s=10))
+        if mt_text is None:  # nothing fast yet: give the AI a real chance
+            try:
+                out, backend = await asyncio.wait_for(ai_task, timeout=12)
+                if out:
+                    return out, backend
+            except Exception as e:
+                log.warning("AI translation failed: %s", e)
+        else:
+            done, _ = await asyncio.wait({ai_task}, timeout=AI_TRANSLATE_GRACE)
+            if ai_task in done and not ai_task.exception() and ai_task.result()[0]:
+                out, backend = ai_task.result()
+                if out:
+                    return out, backend
+            ai_task.cancel()
+    if mt_text:
+        return mt_text, "machine"
     prompt = (
         "You are a professional live subtitle translator for university lectures. "
         f"Translate into {target}.\n"
