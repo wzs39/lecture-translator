@@ -21,6 +21,7 @@ import argparse
 import difflib
 import json
 import re
+import socket
 import sys
 import threading
 import time
@@ -275,10 +276,31 @@ def _heartbeat(url):
     threading.Thread(target=loop, daemon=True).start()
 
 
+_LOCK_SOCKET = None  # module-level reference keeps the singleton bind alive
+
+
+def _lock_singleton():
+    """Refuse to start when another bridge instance is already running.
+    Two bridges reading the same caption window double-post everything and
+    fight each other; a stale one can also mask a healthy one. The bound
+    socket must stay referenced for the process lifetime or the port is
+    released and a second instance can start."""
+    global _LOCK_SOCKET
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.bind(("127.0.0.1", 49190))
+        s.listen(1)
+    except OSError:
+        print("  another bridge instance is already running; exiting.")
+        sys.exit(0)
+    _LOCK_SOCKET = s
+
+
 def main():
     # Live Captions translations contain Chinese; never crash on a GBK console.
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(errors="replace")
+    _lock_singleton()  # exits if another bridge is already running
     ap = argparse.ArgumentParser()
     ap.add_argument("--url", default="http://localhost:8000")
     args = ap.parse_args()
@@ -302,11 +324,20 @@ def main():
     offset0 = time.monotonic()
     prev_text = ""
     last_change = time.monotonic()
+    last_rediscover = time.monotonic()
     try:
         while True:
             time.sleep(POLL_SEC)
             try:
                 now = time.monotonic()
+                # Refresh the window handle periodically: the Live Captions
+                # UIA element can go stale (window closed/reopened, display
+                # change) and then silently never delivers new text again.
+                if now - last_rediscover >= 60:
+                    last_rediscover = now
+                    fresh = find_captions_window()
+                    if fresh is not None:
+                        win = fresh
                 text = caption_text(win)
                 if text != prev_text:
                     prev_text = text
@@ -329,9 +360,19 @@ def main():
                 if delivery.retry_due(now):
                     delivery.retry(now)
             except Exception as e:
-                # never let one bad poll kill the bridge
-                print(f"  poll error: {e}")
-                time.sleep(1)
+                # stale handle: re-discover the window and keep going
+                print(f"  poll error: {e}; re-discovering the caption window")
+                win = None
+                while win is None:
+                    try:
+                        win = find_captions_window()
+                    except Exception:
+                        win = None
+                    if win is None:
+                        print("  Live Captions window gone; waiting for it to reopen...")
+                        time.sleep(3)
+                print("  caption window reconnected")
+                prev_text = ""
     finally:
         # Ctrl+C / window vanished: flush the half-built chunk so nothing is lost
         if chunker.sents:
