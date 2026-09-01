@@ -9,7 +9,6 @@ runs inside containers. A small host-side bridge (bridge/live_captions_bridge.py
 reads caption text via UI Automation and posts it here.
 """
 import os
-import re
 import time
 import asyncio
 import logging
@@ -56,6 +55,8 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 CAPTIONS = []  # [{text, translation, offset, at}]
 ACTIVE_SESSION = {"id": None}
 BRIDGE_LAST_SEEN = 0.0  # monotonic timestamp of the bridge's last heartbeat
+CAPTIONS_MAX = 500  # live polling only; persisted transcripts are never pruned
+TRANSLATION_CACHE_MAX = 500
 
 
 class TranslateReq(BaseModel):
@@ -158,7 +159,7 @@ def cache_get(key):
 
 def cache_put(key, value):
     _translation_cache[key] = value
-    while len(_translation_cache) > 500:
+    while len(_translation_cache) > TRANSLATION_CACHE_MAX:
         _translation_cache.pop(next(iter(_translation_cache)))
 
 
@@ -328,29 +329,6 @@ def get_session(sid: str):
     return json.loads(_session_path(sid).read_text(encoding="utf-8"))
 
 
-class SegmentReq(BaseModel):
-    text: str
-    offset: float = 0.0
-    translation: str = ""
-
-
-@app.post("/api/sessions/{sid}/segments")
-def append_segment(sid: str, req: SegmentReq):
-    """Append one committed transcription segment (original + translation)."""
-    if not req.text.strip():
-        raise HTTPException(400, "text is required")
-    path = _session_path(sid)
-    session = json.loads(path.read_text(encoding="utf-8"))
-    session["transcript"].append({
-        "text": req.text.strip(),
-        "translation": req.translation.strip(),
-        "offset": round(req.offset, 2),
-        "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-    })
-    path.write_text(json.dumps(session, ensure_ascii=False, indent=2), encoding="utf-8")
-    return session["transcript"][-1]
-
-
 @app.post("/api/terms")
 async def terms(req: OrganizeReq):
     if not req.text.strip():
@@ -410,7 +388,10 @@ def _storage_snapshot():
             log_info["lines"] = sum(1 for _ in f)
     return {"sessions": sorted(sessions, key=lambda x: x["created"], reverse=True),
             "captions_log": log_info,
-            "total_size": sum(s["size"] for s in sessions) + log_info["size"]}
+            "total_size": sum(s["size"] for s in sessions) + log_info["size"],
+            "retention": {"live_caption_buffer_max": CAPTIONS_MAX,
+                          "translation_cache_max": TRANSLATION_CACHE_MAX,
+                          "persisted_transcripts": "unlimited"}}
 
 
 @app.get("/api/storage")
@@ -447,6 +428,8 @@ async def self_check():
                 checks["model"] = "ok" if CONFIG["model"] in names else "missing"
     except Exception as e:
         checks["ollama_error"] = str(e)
+    checks["memory"] = {"live_captions": len(CAPTIONS), "live_caption_limit": CAPTIONS_MAX,
+                        "translation_cache": len(_translation_cache), "translation_cache_limit": TRANSLATION_CACHE_MAX}
     checks["ready"] = checks["ollama"] is True and checks["model"] == "ok" and checks["data_dir"] is True
     return checks
 
@@ -648,7 +631,7 @@ async def push_caption(req: CaptionReq):
         "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
     CAPTIONS.append(line)
-    del CAPTIONS[:-500]  # keep the poll buffer bounded
+    del CAPTIONS[:-CAPTIONS_MAX]  # keep only the live poll buffer bounded
     try:  # durable cache: every incoming chunk survives even without a session
         with (DATA_DIR / "captions-log.jsonl").open("a", encoding="utf-8") as f:
             f.write(json.dumps(line, ensure_ascii=False) + "\n")
