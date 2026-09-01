@@ -11,7 +11,18 @@ Windows Live Captions (Win+Ctrl+L, high-quality on-device ASR)
                └─> subtitle page + session transcript (Docker volume)
 ```
 
-## Run on Windows
+## One-click install as a desktop app (recommended)
+
+1. Double-click `install.bat`: copies the whole app to
+   `%LOCALAPPDATA%\LectureTranslator` and creates a desktop shortcut
+   “Lecture Translator” (no admin rights needed).
+2. Double-click the desktop shortcut → press **启动**. The launcher starts
+   Docker Desktop if needed, brings up the stack, launches the caption bridge
+   minimized, and opens the browser. **停止** shuts the stack and bridge down.
+3. Rebuild the launcher after edits: `launcher\build.bat` (uses the .NET
+   Framework csc.exe that ships with Windows; no installs).
+
+## Run on Windows (manual)
 
 1. Start Docker Desktop, then double-click `start.bat` → opens
    `http://localhost:8000`.

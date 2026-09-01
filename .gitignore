@@ -16,3 +16,4 @@ recordings/
 # local scratch
 /tmp/
 *.err
+selftest.log

@@ -1,3 +1,8 @@
+# Fixed project name: the launcher can be installed anywhere (e.g.
+# %%LOCALAPPDATA%%\LectureTranslator) and still reuse the same stack,
+# networks, and volumes instead of creating a second one.
+name: lecture-translator
+
 services:
   ollama:
     image: ollama/ollama:latest
