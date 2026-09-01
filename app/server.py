@@ -498,6 +498,17 @@ async def mymemory_translate(text: str, to: str) -> str:
 
 
 AI_TRANSLATE_GRACE = 2.5  # seconds machine translation waits for the AI version
+RATE_LIMIT_COOLDOWN = 60.0  # skip a 429'd cloud source for this long
+_cloud_cooldowns: dict[str, float] = {}  # source name -> monotonic retry-at
+
+
+def _cloud_available(name: str) -> bool:
+    return time.monotonic() >= _cloud_cooldowns.get(name, 0.0)
+
+
+def _mark_rate_limited(name: str):
+    _cloud_cooldowns[name] = time.monotonic() + RATE_LIMIT_COOLDOWN
+    log.warning("%s rate-limited; cooling down for %ss", name, RATE_LIMIT_COOLDOWN)
 
 
 async def translate_text(text: str, target: str, context: str = "") -> tuple[str, str]:
@@ -516,12 +527,19 @@ async def translate_text(text: str, target: str, context: str = "") -> tuple[str
         return hit[0], "cache"
     to = CLOUD_TARGET.get(target, "zh-CN")
     mt_text = None
-    for cloud in (google_translate, mymemory_translate):
+    for name, cloud in (("google", google_translate), ("mymemory", mymemory_translate)):
+        if not _cloud_available(name):
+            continue
         try:
             out = await asyncio.wait_for(cloud(text, to), timeout=4)
             if out:
                 mt_text = out
                 break
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code in (429, 403):
+                _mark_rate_limited(name)
+            else:
+                log.warning("%s failed: %s", cloud.__name__, e)
         except Exception as e:
             log.warning("%s failed: %s", cloud.__name__, e)
 
@@ -722,6 +740,22 @@ async def health():
     except Exception:
         pass
     return {"source": "windows-live-captions", "ollama": ok_ollama, "model": CONFIG["model"], "self_check": "/api/self-check"}
+
+
+@app.on_event("startup")
+async def warm_ollama():
+    """Preload the model at startup so the first real caption doesn't pay
+    the cold-start load (8-10 s). Fire-and-forget: failures just log."""
+    async def _warm():
+        try:
+            async with httpx.AsyncClient(timeout=300) as cx:
+                await cx.post(f"{CONFIG['url']}/api/generate", json={
+                    "model": CONFIG["model"], "prompt": "ok", "stream": False,
+                    "think": False, "options": {"num_predict": 1}})
+            log.info("ollama model %s warmed up", CONFIG["model"])
+        except Exception as e:
+            log.warning("ollama warmup skipped: %s", e)
+    asyncio.create_task(_warm())
 
 
 # ---- subtitle UI ----

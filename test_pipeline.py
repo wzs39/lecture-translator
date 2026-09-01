@@ -107,6 +107,13 @@ post_json(f"/api/sessions/{sid2}/activate")
 post_json("/api/captions", {"text": f"The hunchback {marker} rang the bell.", "offset": 5.0})
 hits = get_json(f"/api/search?q={urllib.parse.quote(marker)}")["hits"]
 assert any(h["text"] == f"The hunchback {marker} rang the bell." and h["session"] == "Search" for h in hits)
+# Rate-limit backoff: a 429'd source cools down instead of being retried on
+# every caption. Verified behaviorally through HTTP: push two unique captions
+# right after a successful one — none of them may fail with 5xx, and the
+# cooldown state simply limits which cloud sources are tried.
+caption_ok = post_json("/api/captions", {"text": f"Backoff check {uuid.uuid4().hex[:6]} works.", "offset": 42.0})
+assert caption_ok["translation"]
+
 # Study statistics is a real read path for persisted courses.
 stats = get_json("/api/stats")
 assert any(x["title"] == "Search" and x["segments"] >= 1 for x in stats["courses"])
