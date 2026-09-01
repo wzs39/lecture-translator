@@ -27,7 +27,8 @@ log = logging.getLogger("lt")
 
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://ollama:11434")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen3:4b")
-CONFIG = {"url": OLLAMA_URL, "model": OLLAMA_MODEL, "deepseek_key": ""}
+CONFIG = {"url": OLLAMA_URL, "model": OLLAMA_MODEL,
+          "ai_base": "https://api.deepseek.com", "ai_key": "", "ai_model": "deepseek-chat"}
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/srv/data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 app = FastAPI(title="lecture-translator")
@@ -63,12 +64,15 @@ class SessionReq(BaseModel):
 class ConfigReq(BaseModel):
     url: str = ""
     model: str = ""
-    deepseek_key: str = ""
+    ai_base: str = ""
+    ai_key: str = ""
+    ai_model: str = ""
+    deepseek_key: str = ""  # legacy field name, merged into ai_key
 
 
 @app.get("/api/config")
 def get_config():
-    return {"url": CONFIG["url"], "model": CONFIG["model"], "deepseek_key": CONFIG["deepseek_key"]}
+    return {k: CONFIG[k] for k in ("url", "model", "ai_base", "ai_key", "ai_model")}
 
 
 @app.post("/api/config")
@@ -77,30 +81,37 @@ def set_config(req: ConfigReq):
         CONFIG["url"] = req.url.strip()
     if req.model.strip():
         CONFIG["model"] = req.model.strip()
-    if req.deepseek_key.strip():
-        CONFIG["deepseek_key"] = req.deepseek_key.strip()
-    return {"url": CONFIG["url"], "model": CONFIG["model"], "deepseek_key": CONFIG["deepseek_key"]}
+    if req.ai_base.strip():
+        CONFIG["ai_base"] = req.ai_base.strip().rstrip("/")
+    if req.ai_key.strip():
+        CONFIG["ai_key"] = req.ai_key.strip()
+    if req.ai_model.strip():
+        CONFIG["ai_model"] = req.ai_model.strip()
+    if req.deepseek_key.strip():  # legacy clients
+        CONFIG["ai_key"] = req.deepseek_key.strip()
+        CONFIG.setdefault("ai_base", CONFIG["ai_base"])
+    return {k: CONFIG[k] for k in ("url", "model", "ai_base", "ai_key", "ai_model")}
 
 
 async def ai_complete(prompt: str, json_mode: bool = False):
-    """AI Q&A backend: DeepSeek web-service API when configured (same
-    model as the chat.deepseek.com web UI), local Ollama otherwise.
-    Returns (text, backend)."""
-    key = CONFIG["deepseek_key"]
+    """AI Q&A backend: any OpenAI-compatible web AI when an API key is
+    configured (DeepSeek, GLM-4-Flash free tier, Groq, OpenRouter, ...),
+    local Ollama otherwise. Returns (text, backend)."""
+    key = CONFIG["ai_key"]
     if key:
         try:
             async with httpx.AsyncClient(timeout=120) as cx:
-                body = {"model": "deepseek-chat",
+                body = {"model": CONFIG["ai_model"],
                         "messages": [{"role": "user", "content": prompt}],
                         "temperature": 0.3, "max_tokens": 1024, "stream": False}
                 if json_mode:
                     body["response_format"] = {"type": "json_object"}
-                r = await cx.post("https://api.deepseek.com/chat/completions",
+                r = await cx.post(f"{CONFIG['ai_base']}/chat/completions",
                                   headers={"Authorization": f"Bearer {key}"}, json=body)
                 r.raise_for_status()
-                return r.json()["choices"][0]["message"]["content"].strip(), "deepseek"
+                return r.json()["choices"][0]["message"]["content"].strip(), CONFIG["ai_model"]
         except Exception as e:
-            log.warning("deepseek failed, falling back to ollama: %s", e)
+            log.warning("cloud AI failed, falling back to ollama: %s", e)
     async with httpx.AsyncClient(timeout=120) as cx:
         body = {"model": CONFIG["model"], "prompt": prompt, "stream": False,
                 "think": False, "options": {"temperature": 0.2, "num_predict": 1024}}
