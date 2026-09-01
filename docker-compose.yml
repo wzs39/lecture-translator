@@ -21,20 +21,12 @@ services:
     environment:
       OLLAMA_URL: http://ollama:11434
       OLLAMA_MODEL: qwen3:4b-instruct
-      WHISPER_MODEL: small
     volumes:
       - recordings:/srv/data
-    mem_limit: 5g
+    mem_limit: 512m
     depends_on:
       - ollama
     restart: unless-stopped
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
 
 volumes:
   ollama:

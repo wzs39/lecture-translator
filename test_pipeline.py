@@ -1,30 +1,39 @@
-import json, struct, math, threading, urllib.request
+import json, struct, math, threading, urllib.request, urllib.error
 
 HOST = "http://localhost:8000"
 
-def wav(seconds=0.2):
-    sr, n = 16000, int(16000 * seconds)
-    pcm = b"".join(struct.pack("<h", int(9000 * math.sin(2 * math.pi * 440 * i / sr))) for i in range(n))
-    return b"RIFF" + struct.pack("<I", 36 + len(pcm)) + b"WAVEfmt " + struct.pack("<IHHIIHH", 16, 1, 1, sr, sr * 2, 2, 16) + b"data" + struct.pack("<I", len(pcm)) + pcm
-
-def transcribe(audio, language="en"):
-    boundary = "lt"
-    body = (b"--lt\r\nContent-Disposition: form-data; name=\"file\"; filename=\"t.wav\"\r\nContent-Type: audio/wav\r\n\r\n" + audio + b"\r\n--lt\r\nContent-Disposition: form-data; name=\"language\"\r\n\r\n" + language.encode() + b"\r\n--lt--\r\n")
-    req = urllib.request.Request(HOST + "/api/transcribe", data=body, headers={"Content-Type": "multipart/form-data; boundary=lt"}, method="POST")
-    return json.load(urllib.request.urlopen(req, timeout=180))
-
-def post_json(path, value):
+def post_json(path, value={}):
     req = urllib.request.Request(HOST + path, data=json.dumps(value).encode(), headers={"Content-Type": "application/json"}, method="POST")
     return json.load(urllib.request.urlopen(req, timeout=180))
 
-assert json.load(urllib.request.urlopen(HOST + "/api/self-check"))["ready"]
-assert post_json("/api/sessions", {"title": "Contract", "language": "fi"})["title"] == "Contract"
-assert all(marker in urllib.request.urlopen(HOST + "/").read().decode() for marker in ["识别：芬兰语", "识别：英语", "保存录音+原文", "AI整理（保留原文）"])
-results = []
-threads = [threading.Thread(target=lambda: results.append(transcribe(wav()))) for _ in range(2)]
-for thread in threads: thread.start()
-for thread in threads: thread.join()
-assert len(results) == 2 and all("audio_duration" in result for result in results)
+def get_json(path):
+    return json.load(urllib.request.urlopen(HOST + path, timeout=180))
+
+assert get_json("/api/self-check")["ready"]
+assert all(marker in urllib.request.urlopen(HOST + "/").read().decode() for marker in
+           ["实时字幕", "字幕桥", "问 AI", "AI整理（保留原文）", "导出 Markdown"])
 assert post_json("/api/translate", {"text": "Our next lecture covers chapter five."})["text"]
 assert isinstance(post_json("/api/terms", {"text": "Photosynthesis converts light energy."})["terms"], list)
+
+# captions pipeline: push a sentence like the bridge does, poll it back, and
+# confirm it lands in the active session's persisted transcript.
+before = len(get_json("/api/captions?since=0")["lines"])
+sid = post_json("/api/sessions", {"title": "Captions", "language": "auto"})["id"]
+assert post_json(f"/api/sessions/{sid}/activate") == {"active": sid}
+line = post_json("/api/captions", {"text": "Photosynthesis converts light energy into chemical energy.", "offset": 3.5})
+assert line["translation"], "caption translation should be non-empty"
+polled = get_json("/api/captions?since=0")
+assert len(polled["lines"]) == before + 1 and polled["lines"][-1]["text"] == line["text"]
+stored = get_json(f"/api/sessions/{sid}")["transcript"]
+assert any(s["text"] == line["text"] and s["offset"] == 3.5 and s["translation"] for s in stored)
+try:
+    post_json("/api/captions", {"text": "   "})
+    raise SystemExit("empty caption should 400")
+except urllib.error.HTTPError as e:
+    assert e.code == 400
+try:
+    post_json("/api/sessions/deadbeef/activate")
+    raise SystemExit("unknown session should 404")
+except urllib.error.HTTPError as e:
+    assert e.code == 404
 print("lecture translator contract: passed")
