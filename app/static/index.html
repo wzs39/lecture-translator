@@ -20,7 +20,13 @@
                   border-radius:8px; padding:8px 10px; font-size:14px; }
   #status { color:var(--dim); font-size:13px; }
   #apiUrl { min-width:280px; }
-  #subs { margin-top:22px; max-width:900px; }
+  .cols { display:flex; gap:14px; align-items:stretch; max-width:1400px; margin-bottom:14px; }
+  .col { flex:1; min-width:0; display:flex; }
+  .panel { flex:1; background:#0f1722; border:1px solid #1e2c40; border-radius:12px; padding:14px 16px; }
+  .panel .step { margin-bottom:12px; }
+  #subs, #aiOut { margin-top:10px; height:56vh; overflow-y:auto; padding-right:6px; }
+  #aiOut:empty::before { content:"AI 回答、术语表和整理笔记会显示在这里"; color:var(--dim); font-size:13px; }
+  @media (max-width: 900px) { .cols { flex-direction:column; } #subs, #aiOut { height:40vh; } }
   .line { padding:10px 14px; border-left:3px solid var(--acc); background:#111a26;
           border-radius:0 10px 10px 0; margin-bottom:10px; }
   .line .orig { color:var(--dim); font-size:13px; margin-bottom:2px; }
@@ -35,51 +41,65 @@
 <div class="sub">Windows 实时字幕（高质量识别）→ 本地 AI 翻译 → 课堂笔记。翻译与整理在 Docker 容器内，识别用 Windows 自带字幕。</div>
 
 <div class="section">
-  <div class="step">① 课程</div>
   <div class="row">
-    <input id="sessionTitle" placeholder="课程名称，如：生物化学" style="min-width:260px">
-    <button id="newSession" class="ghost">新建课程</button>
-    <span id="sessionLabel" style="color:var(--dim)">未创建</span>
+    <div>
+      <div class="step">① 课程</div>
+      <div class="row">
+        <input id="sessionTitle" placeholder="课程名称，如：生物化学" style="min-width:240px">
+        <button id="newSession" class="ghost">新建课程</button>
+        <span id="sessionLabel" style="color:var(--dim)">未创建</span>
+      </div>
+    </div>
+    <div>
+      <div class="step">② 服务状态</div>
+      <div class="row">
+        <span id="status">idle</span>
+        <button id="checkBtn" class="ghost">检查服务</button>
+      </div>
+    </div>
+  </div>
+  <div style="margin-top:12px">
+    <div class="step">③ 文字来源：英语用 Windows 实时字幕；芬兰语用浏览器语音识别（实时字幕不支持芬兰语）</div>
+    <div class="row">
+      <button id="captionBtn" class="ghost">打开实时字幕 (Win+Ctrl+L)</button>
+      <span style="color:var(--dim);font-size:13px">英语讲座：保持字幕窗口可见，双击 <b>start-captions.bat</b> 启动字幕桥。</span>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <select id="speechLang" title="浏览器语音识别语言">
+        <option value="fi-FI">语音识别：芬兰语</option>
+        <option value="en-US">语音识别：英语</option>
+        <option value="sv-SE">语音识别：瑞典语</option>
+        <option value="zh-CN">语音识别：中文</option>
+      </select>
+      <button id="speechBtn">🎤 浏览器语音识别（芬兰语等）</button>
+      <button id="speechStop" class="ghost" disabled>■ 停止识别</button>
+      <span style="color:var(--dim);font-size:13px">需要允许麦克风；识别结果与字幕桥一样自动翻译并保存。</span>
+    </div>
   </div>
 </div>
 
-<div class="section">
-  <div class="step">② 服务状态</div>
-  <div class="row">
-    <span id="status">idle</span>
-    <button id="checkBtn" class="ghost">检查服务</button>
+<div class="cols">
+  <div class="col">
+    <div class="panel">
+      <div class="step">字幕流（原文 + 翻译）</div>
+      <div id="subs"></div>
+    </div>
   </div>
-</div>
-
-<div class="section">
-  <div class="step">③ 文字来源：英语用 Windows 实时字幕；芬兰语用浏览器语音识别（实时字幕不支持芬兰语）</div>
-  <div class="row">
-    <button id="captionBtn" class="ghost">打开实时字幕 (Win+Ctrl+L)</button>
-    <span style="color:var(--dim);font-size:13px">英语讲座：保持字幕窗口可见，双击 <b>start-captions.bat</b> 启动字幕桥。</span>
+  <div class="col">
+    <div class="panel">
+      <div class="step">课堂 AI 问答与笔记（不影响字幕）</div>
+      <div class="row">
+        <input id="question" placeholder="问这节课的问题" style="flex:1;min-width:160px">
+        <button id="askBtn" class="ghost">问 AI</button>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button id="termsBtn" class="ghost">提取术语</button>
+        <button id="organizeBtn" class="ghost">✨ AI整理（保留原文）</button>
+        <button id="exportBtn" class="ghost">导出 Markdown</button>
+      </div>
+      <div id="aiOut"></div>
+    </div>
   </div>
-  <div class="row" style="margin-top:10px">
-    <select id="speechLang" title="浏览器语音识别语言">
-      <option value="fi-FI">语音识别：芬兰语</option>
-      <option value="en-US">语音识别：英语</option>
-      <option value="sv-SE">语音识别：瑞典语</option>
-      <option value="zh-CN">语音识别：中文</option>
-    </select>
-    <button id="speechBtn">🎤 浏览器语音识别（芬兰语等）</button>
-    <button id="speechStop" class="ghost" disabled>■ 停止识别</button>
-    <span style="color:var(--dim);font-size:13px">需要允许麦克风；识别结果与字幕桥一样自动翻译并保存。</span>
-  </div>
-</div>
-
-<div class="section">
-  <div class="step">④ 课堂工具（需要先有字幕文字）</div>
-  <div class="row">
-    <input id="question" placeholder="问这节课的问题" style="min-width:260px">
-    <button id="askBtn" class="ghost">问 AI</button>
-    <button id="termsBtn" class="ghost">提取术语</button>
-    <button id="organizeBtn" class="ghost">✨ AI整理（保留原文）</button>
-    <button id="exportBtn" class="ghost">导出 Markdown</button>
-  </div>
-  <div id="aiOut"></div>
 </div>
 
 <div class="section">
