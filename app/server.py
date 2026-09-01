@@ -300,7 +300,7 @@ async def health():
             ok_ollama = (await cx.get(f"{CONFIG['url']}/api/tags")).status_code == 200
     except Exception:
         pass
-    return {"asr_model": WHISPER_MODEL, "ollama": ok_ollama, "model": CONFIG["model"], "self_check": "/api/self-check"}
+    return {"source": "windows-live-captions", "ollama": ok_ollama, "model": CONFIG["model"], "self_check": "/api/self-check"}
 
 
 # ---- subtitle UI ----

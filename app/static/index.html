@@ -56,11 +56,10 @@
 </div>
 
 <div class="section">
-  <div class="step">③ Windows 实时字幕（文字来源）</div>
+  <div class="step">③ Windows 实时字幕（唯一的文字来源，无麦克风收听）</div>
   <div class="row">
     <button id="captionBtn" class="ghost">打开实时字幕 (Win+Ctrl+L)</button>
-    <button id="bridgeBtn">启动字幕桥</button>
-    <span style="color:var(--dim);font-size:13px">先打开实时字幕窗口并保持可见，再启动字幕桥。桥运行后字幕自动出现在下方。</span>
+    <span style="color:var(--dim);font-size:13px">保持字幕窗口可见，然后双击项目目录里的 <b>start-captions.bat</b> 启动字幕桥；字幕会自动出现在下方。</span>
   </div>
 </div>
 
@@ -176,7 +175,6 @@ $("saveConfig").onclick = async () => {
 $("newSession").onclick = createSession; $("askBtn").onclick = askAI; $("exportBtn").onclick = exportMarkdown;
 $("termsBtn").onclick = extractTerms; $("organizeBtn").onclick = organize;
 $("captionBtn").onclick = () => { window.open("ms-settings:easeofaccess-captions", "_blank"); };
-$("bridgeBtn").onclick = () => setStatus("run start-captions.bat next to this project's folder");
 $("checkBtn").onclick = async () => { setStatus("checking..."); try { const r=await fetch("/api/self-check"); const h=await r.json(); setStatus(h.ready ? "ready" : "check failed", `ollama=${h.ollama} model=${h.model}`); } catch(e) { setStatus("backend unreachable"); } };
 loadConfig();
 fetch("/api/self-check").then(r=>r.json()).then(h=>setStatus(h.ready ? "ready" : "check failed", `ollama=${h.ollama} model=${h.model}`))
