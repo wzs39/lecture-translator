@@ -262,6 +262,18 @@ class Delivery:
             mark_confirmed(total - len(self.unsent))
 
 
+def _heartbeat(url):
+    """Best-effort liveness ping so the page can show bridge status."""
+    def loop():
+        while True:
+            try:
+                requests.post(f"{url}/api/bridge/heartbeat", timeout=5)
+            except Exception:
+                pass
+            time.sleep(10)
+    threading.Thread(target=loop, daemon=True).start()
+
+
 def main():
     # Live Captions translations contain Chinese; never crash on a GBK console.
     if hasattr(sys.stdout, "reconfigure"):
@@ -282,6 +294,7 @@ def main():
     tracker = SentenceTracker()
     chunker = Chunker()
     delivery = Delivery(args.url)
+    _heartbeat(args.url)
     pending = len(delivery.unsent)
     if pending:
         print(f"  resending {pending} cached chunk(s) from a previous run...")

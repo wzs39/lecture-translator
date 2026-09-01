@@ -30,4 +30,10 @@ exit /b 1
 :ready
 echo Lecture Translator is ready: http://localhost:8000
 start "" http://localhost:8000
+
+rem Also launch the Live Captions bridge in a minimized window (if set up)
+if exist "%~dp0bridge\.venv\Scripts\python.exe" (
+  start "LectureTranslator-Bridge" /min cmd /c "%~dp0start-captions.bat"
+  echo Live Captions bridge launched in a minimized window.
+)
 endlocal

@@ -53,8 +53,9 @@
     <div>
       <div class="step">② 服务状态</div>
       <div class="row">
-        <span id="status">idle</span>
-        <button id="checkBtn" class="ghost">检查服务</button>
+    <span id="status">idle</span>
+    <span id="bridgeLamp" style="color:var(--dim);font-size:13px">● 桥状态未知</span>
+    <button id="checkBtn" class="ghost">检查服务</button>
       </div>
     </div>
   </div>
@@ -84,7 +85,8 @@
       <div class="step">字幕流（原文 + 翻译）</div>
       <div class="row" style="margin-bottom:10px">
         <button id="saveTranscript" class="ghost">💾 保存翻译记录</button>
-        <span style="color:var(--dim);font-size:12px">下载 当前课程 的全部原文+翻译（TXT）</span>
+        <button id="saveSrt" class="ghost">导出 SRT 字幕</button>
+        <span style="color:var(--dim);font-size:12px">当前课程全部原文+翻译</span>
       </div>
       <div id="subs"></div>
     </div>
@@ -149,6 +151,11 @@
     <span id="storageSummary" style="color:var(--dim);font-size:13px"></span>
   </div>
   <div id="storageList" style="margin-top:8px;font-size:13px"></div>
+  <div class="row" style="margin-top:12px">
+    <input id="searchQ" placeholder="跨课程搜索关键词…" style="min-width:220px">
+    <button id="searchBtn" class="ghost">搜索</button>
+  </div>
+  <div id="searchResults" style="margin-top:8px;font-size:13px"></div>
 </div>
 
 <div id="subs"></div>
@@ -187,6 +194,8 @@ async function poll() {
       addLine(l.text, l.translation, l.offset);
     }
     pollSince = j.next;
+    $("bridgeLamp").textContent = j.bridge_online ? "🟢 字幕桥在线" : "🔴 字幕桥离线";
+    $("bridgeLamp").style.color = j.bridge_online ? "#6fe38b" : "var(--dim)";
     if (j.lines.length) setStatus("capturing", `${original.length} 段`);
   } catch {}
 }
@@ -323,6 +332,29 @@ $( "saveAi").onclick = async () => {
     body:JSON.stringify({ai_base:$("aiBase").value, ai_key:$("aiKey").value, ai_model:$("aiModelName").value})});
   if (!r.ok) return setStatus("cloud AI save failed");
   setStatus("cloud AI saved", $("aiModelName").value || "local only");
+};
+
+$( "saveSrt").onclick = async () => {
+  let transcript = lines;
+  if (sessionId) { try { const s = await (await fetch(`/api/sessions/${sessionId}`)).json(); if (s.transcript.length) transcript = s.transcript; } catch {} }
+  if (!transcript.length) return setStatus("暂无翻译内容");
+  const srtTime = s => { const ms = Math.round((s||0)*1000); const h=String(Math.floor(ms/3600000)).padStart(2,"0"), m=String(Math.floor(ms%3600000/60000)).padStart(2,"0"), sec=String(Math.floor(ms%60000/1000)).padStart(2,"0"), ml=String(ms%1000).padStart(3,"0"); return `${h}:${m}:${sec},${ml}`; };
+  const out = transcript.map((t, i) => {
+    const start = t.offset || 0, end = (transcript[i+1] && transcript[i+1].offset) || start + 5;
+    return `${i+1}\n${srtTime(start)} --> ${srtTime(end)}\n${t.text}\n${t.zh ?? t.translation}`;
+  }).join("\n\n");
+  const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([out], {type:"text/plain;charset=utf-8"}));
+  a.download = "lecture.srt"; a.click(); URL.revokeObjectURL(a.href);
+  setStatus("SRT exported", `${transcript.length} 条`);
+};
+
+$("searchBtn").onclick = async () => {
+  const q = $("searchQ").value.trim();
+  if (!q) return;
+  const j = await (await fetch(`/api/search?q=${encodeURIComponent(q)}`)).json();
+  $("searchResults").innerHTML = j.hits.length
+    ? j.hits.map(h => `<div style="margin:4px 0"><b>${escapeHtml(h.session)}</b>${h.offset != null ? ` @ ${fmtTs(h.offset)}` : ""}：<br>${escapeHtml(h.text)}${h.translation ? `<br><span style="color:var(--dim)">${escapeHtml(h.translation)}</span>` : ""}</div>`).join("")
+    : `<div style="color:var(--dim)">无匹配结果</div>`;
 };
 
 // ---- storage management ----

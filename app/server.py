@@ -38,6 +38,7 @@ app = FastAPI(title="lecture-translator")
 # new segments are persisted into.
 CAPTIONS = []  # [{text, translation, offset, at}]
 ACTIVE_SESSION = {"id": None}
+BRIDGE_LAST_SEEN = 0.0  # monotonic timestamp of the bridge's last heartbeat
 
 
 class TranslateReq(BaseModel):
@@ -600,10 +601,45 @@ async def push_caption(req: CaptionReq):
     return line
 
 
+@app.post("/api/bridge/heartbeat")
+def bridge_heartbeat():
+    global BRIDGE_LAST_SEEN
+    BRIDGE_LAST_SEEN = time.monotonic()
+    return {"ok": True}
+
+
 @app.get("/api/captions")
 def poll_captions(since: int = 0):
     since = max(0, min(since, len(CAPTIONS)))
-    return {"lines": CAPTIONS[since:], "next": len(CAPTIONS), "active_session": ACTIVE_SESSION["id"]}
+    return {"lines": CAPTIONS[since:], "next": len(CAPTIONS), "active_session": ACTIVE_SESSION["id"],
+            "bridge_online": (time.monotonic() - BRIDGE_LAST_SEEN) < 25}
+
+
+@app.get("/api/search")
+def search_sessions(q: str = ""):
+    """Keyword search across every course's transcript and notes."""
+    q = q.strip().lower()
+    if not q:
+        return {"hits": []}
+    hits = []
+    for p in sorted(DATA_DIR.glob("session-*.json"), key=lambda x: x.stat().st_mtime, reverse=True):
+        try:
+            s = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        for seg in s.get("transcript", []):
+            hay = (seg.get("text", "") + " " + seg.get("translation", "")).lower()
+            if q in hay:
+                hits.append({"session": s.get("title", ""), "sid": s.get("id"),
+                             "offset": seg.get("offset"), "text": seg.get("text", ""),
+                             "translation": seg.get("translation", "")})
+        notes = s.get("notes")
+        if isinstance(notes, str) and q in notes.lower():
+            hits.append({"session": s.get("title", ""), "sid": s.get("id"),
+                         "offset": None, "text": "[我的笔记] " + notes[:120], "translation": ""})
+        if len(hits) >= 50:
+            break
+    return {"hits": hits[:50]}
 
 
 @app.post("/api/sessions/{sid}/activate")

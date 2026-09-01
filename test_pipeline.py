@@ -1,4 +1,4 @@
-import json, struct, math, threading, urllib.request, urllib.error
+import json, struct, math, threading, urllib.request, urllib.error, urllib.parse
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 HOST = "http://localhost:8000"
@@ -83,7 +83,17 @@ mock = HTTPServer(("127.0.0.1", 0), MockAI)
 threading.Thread(target=mock.serve_forever, daemon=True).start()
 mock_port = mock.server_address[1]
 post_json("/api/config", {"ai_base": f"http://host.docker.internal:{mock_port}/v1", "ai_key": "test", "ai_model": "mock-model"})
-post_json("/api/captions", {"text": "The Mitokondrio produces energy for the cell.", "offset": 88.0})
+post_json("/api/captions", {"text": f"The Mitokondrio produces energy {uuid.uuid4().hex[:6]} for the cell.", "offset": 88.0})
 assert "Mitokondrio=线粒体" in captured.get("prompt", ""), f"glossary not injected: {captured.get('prompt','')[:200]}"
 post_json("/api/config", {"ai_base": old_cfg["ai_base"], "ai_key": old_cfg["ai_key"], "ai_model": old_cfg["ai_model"]})
+
+# heartbeat + cross-course search
+post_json("/api/bridge/heartbeat", {})
+assert get_json("/api/captions?since=0")["bridge_online"] is True
+marker = f"quasimodo {uuid.uuid4().hex[:6]}"
+sid2 = post_json("/api/sessions", {"title": "Search"})["id"]
+post_json(f"/api/sessions/{sid2}/activate")
+post_json("/api/captions", {"text": f"The hunchback {marker} rang the bell.", "offset": 5.0})
+hits = get_json(f"/api/search?q={urllib.parse.quote(marker)}")["hits"]
+assert any(h["text"] == f"The hunchback {marker} rang the bell." and h["session"] == "Search" for h in hits)
 print("lecture translator contract: passed")

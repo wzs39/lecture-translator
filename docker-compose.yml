@@ -17,7 +17,7 @@ services:
     build: ./app
     container_name: lt-app
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"  # loopback only: the page/API stays off the LAN
     environment:
       OLLAMA_URL: http://ollama:11434
       OLLAMA_MODEL: qwen3:4b-instruct
