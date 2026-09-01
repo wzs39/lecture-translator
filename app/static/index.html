@@ -298,16 +298,39 @@ async function loadStorage() {
     $("storageSummary").textContent = `课程 ${s.sessions.length} 门 · 字幕日志 ${s.captions_log.lines} 行 · 合计 ${fmtSize(s.total_size)}`;
     $("storageList").innerHTML = s.sessions.map(x =>
       `<div class="row" style="margin:4px 0">
-         <span style="min-width:200px">${escapeHtml(x.title || x.id)}</span>
+         <span style="min-width:200px">${escapeHtml(x.title || x.id)}${x.id === sessionId ? " ✅" : ""}</span>
          <span style="color:var(--dim)">${x.created.slice(0,16).replace("T"," ")} · ${x.segments} 段 · ${fmtSize(x.size)}</span>
+         <button class="ghost" data-switch="${x.id}" data-title="${escapeHtml(x.title || "")}" style="padding:2px 10px;font-size:12px">切换</button>
          <button class="ghost" data-del="${x.id}" style="padding:2px 10px;font-size:12px">删除</button>
        </div>`).join("") || `<div style="color:var(--dim)">暂无课程会话</div>`;
     $("storageList").querySelectorAll("[data-del]").forEach(btn => btn.onclick = async () => {
       if (!confirm("确定删除这门课程的全部记录？不可恢复。")) return;
       await fetch(`/api/sessions/${btn.dataset.del}`, {method:"DELETE"});
+      if (sessionId === btn.dataset.del) { sessionId = null; $("sessionLabel").textContent = "未创建"; }
       loadStorage();
     });
+    $("storageList").querySelectorAll("[data-switch]").forEach(btn => btn.onclick = () => switchSession(btn.dataset.switch, btn.dataset.title));
   } catch { $("storageSummary").textContent = "加载失败"; }
+}
+
+async function switchSession(sid, title) {
+  try {
+    const s = await (await fetch(`/api/sessions/${sid}`)).json();
+    await fetch(`/api/sessions/${sid}/activate`, {method:"POST"});
+    sessionId = sid;
+    $("sessionLabel").textContent = s.title;
+    $("sessionTitle").value = s.title;
+    // rebuild both columns from the persisted transcript
+    $("subs").innerHTML = ""; lines = []; original = [];
+    for (const t of s.transcript.slice(-60).reverse()) addLine(t.text, t.translation, t.offset);
+    original = s.transcript.map(t => t.text);
+    lines = s.transcript.map(t => ({orig: t.text, zh: t.translation, offset: t.offset}));
+    const n = s.notes; $("myNotes").value = Array.isArray(n) ? "" : (n || "");
+    pollSince = null; // resync the caption cursor so nothing old is re-rendered
+    try { const b = await (await fetch("/api/captions?since=0")).json(); pollSince = b.next; } catch {}
+    loadStorage();
+    setStatus("course switched", `“${s.title}” · ${s.transcript.length} 段`);
+  } catch { setStatus("switch failed"); }
 }
 $("storageRefresh").onclick = loadStorage;
 $("clearLog").onclick = async () => {
