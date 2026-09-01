@@ -76,6 +76,7 @@
   <div class="row">
     <input id="apiUrl" placeholder="Ollama 地址，如 http://ollama:11434">
     <input id="apiModel" placeholder="模型名，如 qwen3:4b-instruct" style="min-width:220px">
+    <input id="dsKey" type="password" placeholder="DeepSeek API Key（可选，填入后问AI/整理用 DeepSeek）" style="min-width:300px">
     <button id="saveConfig" class="ghost">保存配置</button>
   </div>
 </div>
@@ -163,12 +164,12 @@ async function exportMarkdown() {
 }
 
 async function loadConfig() {
-  try { const c = await (await fetch("/api/config")).json(); $("apiUrl").value = c.url; $("apiModel").value = c.model; } catch {}
+  try { const c = await (await fetch("/api/config")).json(); $("apiUrl").value = c.url; $("apiModel").value = c.model; $("dsKey").value = c.deepseek_key || ""; } catch {}
 }
 $("saveConfig").onclick = async () => {
   setStatus("saving config...");
   const r = await fetch("/api/config", {method:"POST", headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({url:$("apiUrl").value, model:$("apiModel").value})});
+    body:JSON.stringify({url:$("apiUrl").value, model:$("apiModel").value, deepseek_key:$("dsKey").value})});
   if (!r.ok) return setStatus("config failed");
   const j = await r.json(); setStatus("config saved", j.model);
 };
