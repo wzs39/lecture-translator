@@ -370,7 +370,7 @@ $("saveDoc").onclick = async () => {
   const transcript = await downloadTranscript();
   if (!transcript.length) return setStatus("暂无翻译内容");
   const body = transcript.map(t => `${t.text}\n${t.zh ?? t.translation}`).join("\n\n");
-  downloadText("lecture-notes.doc", `<html><meta charset="utf-8"><body><h1>${escapeHtml($("sessionTitle").value || "Lecture")}</h1><pre>${escapeHtml(body)}</pre></body></html>", "application/msword");
+  downloadText("lecture-notes.doc", `<html><meta charset="utf-8"><body><h1>${escapeHtml($("sessionTitle").value || "Lecture")}</h1><pre>${escapeHtml(body)}</pre></body></html>`, "application/msword");
   setStatus("Word 已导出", `${transcript.length} 段`);
 };
 
