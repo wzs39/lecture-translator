@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+
+# runtime data (recordings/session data live in Docker volumes)
+data/
+recordings/
+
+# build / pull logs
+*.log
+
+# local scratch
+/tmp/

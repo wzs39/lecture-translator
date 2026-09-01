@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Lecture Translator</title>
+<style>
+  :root { --bg:#0b0f14; --fg:#e8eef7; --dim:#8fa3bd; --acc:#4da3ff; }
+  * { box-sizing:border-box; margin:0; }
+  body { background:var(--bg); color:var(--fg); font:15px/1.5 system-ui,sans-serif; padding:24px; }
+  h1 { font-size:18px; margin-bottom:4px; }
+  .sub { color:var(--dim); font-size:13px; margin-bottom:18px; }
+  .section { background:#0f1722; border:1px solid #1e2c40; border-radius:12px; padding:14px 16px; margin-bottom:14px; max-width:940px; }
+  .step { color:var(--acc); font-size:13px; font-weight:600; margin-bottom:10px; }
+  .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  button { background:var(--acc); color:#04121f; border:0; border-radius:8px;
+           padding:10px 18px; font-weight:600; cursor:pointer; font-size:14px; }
+  button.ghost { background:#1b2735; color:var(--fg); }
+  button:disabled { opacity:.4; cursor:default; }
+  select, input { background:#1b2735; color:var(--fg); border:1px solid #2a3b52;
+                  border-radius:8px; padding:8px 10px; font-size:14px; }
+  #status { color:var(--dim); font-size:13px; }
+  #level { width:180px; accent-color:var(--acc); }
+  #meter { width:180px; height:10px; }
+  #apiUrl { min-width:280px; }
+  #subs { margin-top:22px; max-width:900px; }
+  .line { padding:10px 14px; border-left:3px solid var(--acc); background:#111a26;
+          border-radius:0 10px 10px 0; margin-bottom:10px; }
+  .line .orig { color:var(--dim); font-size:13px; margin-bottom:2px; }
+  .line .zh { font-size:17px; }
+  .float { position:fixed; left:50%; transform:translateX(-50%); bottom:26px;
+           max-width:92vw; background:rgba(8,14,22,.92); border:1px solid #22344d;
+           border-radius:14px; padding:12px 18px; font-size:18px; text-align:center;
+           box-shadow:0 8px 30px rgba(0,0,0,.5); display:none; }
+  .float .orig { color:var(--dim); font-size:13px; }
+  #hud { position:fixed; right:18px; top:18px; color:var(--dim); font-size:12px;
+         background:rgba(8,14,22,.85); border:1px solid #22344d; border-radius:10px; padding:8px 12px; }
+</style>
+</head>
+<body>
+<h1>Lecture Translator</h1>
+<div class="sub">音频/字幕采集 → faster-whisper 识别 → 自然翻译 → 课堂笔记。全部计算都在 Docker 容器内。</div>
+
+<div class="section">
+  <div class="step">① 课程</div>
+  <div class="row">
+    <input id="sessionTitle" placeholder="课程名称，如：生物化学" style="min-width:260px">
+    <button id="newSession" class="ghost">新建课程</button>
+    <span id="sessionLabel" style="color:var(--dim)">未创建</span>
+  </div>
+</div>
+
+<div class="section">
+  <div class="step">② 语言</div>
+  <div class="row">
+    <select id="language" title="老师讲话的语言">
+      <option value="auto">识别：自动</option>
+      <option value="fi">识别：芬兰语</option>
+      <option value="en">识别：英语</option>
+      <option value="zh">识别：中文</option>
+    </select>
+    <select id="target" title="翻译成什么语言">
+      <option value="Chinese (Simplified)">→ 简体中文</option>
+      <option value="English">→ English</option>
+      <option value="Spanish">→ Español</option>
+    </select>
+    <span id="status">idle</span>
+    <button id="checkBtn" class="ghost">检查服务</button>
+  </div>
+</div>
+
+<div class="section">
+  <div class="step">③ 收听（开始采集音频）</div>
+  <div class="row">
+    <button id="btnMic">🎙 开始麦克风</button>
+    <button id="btnTab" class="ghost">🖥 采集标签页/系统音频</button>
+    <button id="btnStop" class="ghost" disabled>■ 停止</button>
+  </div>
+  <div class="row" style="margin-top:10px">
+    <label>声音阈值 <input id="level" type="range" min="0.001" max="0.1" step="0.001" value="0.012"></label>
+    <progress id="meter" max="0.1" value="0"></progress>
+    <button id="captionBtn" class="ghost">Windows 实时字幕设置</button>
+  </div>
+</div>
+
+<div class="section">
+  <div class="step">④ 课堂工具（需要先有识别出的文字）</div>
+  <div class="row">
+    <input id="question" placeholder="问这节课的问题" style="min-width:260px">
+    <button id="askBtn" class="ghost">问 AI</button>
+    <button id="termsBtn" class="ghost">提取术语</button>
+    <button id="organizeBtn" class="ghost">✨ AI整理（保留原文）</button>
+  </div>
+  <div class="row" style="margin-top:10px">
+    <button id="saveBtn" class="ghost">💾 保存录音+原文</button>
+    <button id="exportBtn" class="ghost">导出 Markdown</button>
+  </div>
+</div>
+
+<div class="section">
+  <div class="step">⑤ AI 服务设置（默认本地 Ollama，无需改动即可使用）</div>
+  <div class="row">
+    <input id="apiUrl" placeholder="Ollama 地址，如 http://ollama:11434">
+    <input id="apiModel" placeholder="模型名，如 qwen3:4b-instruct" style="min-width:220px">
+    <button id="saveConfig" class="ghost">保存配置</button>
+  </div>
+</div>
+
+<div id="subs"></div>
+<div class="float" id="float"><div class="orig" id="fOrig"></div><div id="fZh"></div></div>
+<div id="hud"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+let audioCtx = null, worklet = null, stream = null;
+let running = false, mode = null;
+let queue = [], busy = false, history = [], original = [], recordChunks = [], sessionId = null;
+let dropped = 0;
+const MAX_QUEUE = 8;
+const SR = 16000;
+// Fast-speech safety: submit on silence (natural boundary), cap length,
+// and overlap consecutive submissions so no words are cut at boundaries.
+const CHUNK_SEC = 12;       // allow a complete lecture sentence
+const SILENCE_SEC = 1.1;    // commit after a natural pause
+const MIN_SUBMIT_SEC = 3.5;
+const OVERLAP_SEC = 1.0;
+
+function setStatus(s, extra="") { $("status").textContent = s + (extra?` · ${extra}`:""); }
+
+async function start(which) {
+  if (running) return;
+  try {
+    if (which === "mic") {
+      stream = await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false, noiseSuppression:true}});
+    } else {
+      stream = await navigator.mediaDevices.getDisplayMedia({video:true, audio:true});
+      if (!stream.getAudioTracks().length) throw new Error("no audio track — tick 'Share tab audio'");
+    }
+  } catch (e) { setStatus("error: " + e.message); return; }
+  mode = which; running = true; recordChunks = []; lastText = ""; queue = [];
+  $("btnMic").disabled = $("btnTab").disabled = true; $("btnStop").disabled = false;
+
+  audioCtx = new AudioContext({sampleRate: SR});
+  const src = audioCtx.createMediaStreamSource(stream);
+  await audioCtx.audioWorklet.addModule("/audio-worklet.js");
+  worklet = new AudioWorkletNode(audioCtx, "lecture-audio");
+  let buf = [];            // pending audio (Float32 chunks of 4096 samples)
+  let silenceRun = 0;      // consecutive low-energy samples at the tail
+  let lastVoicedEnd = -1;  // index (in chunks) after the last voiced audio
+  const CHUNK_SAMP = 4096;
+  const energy = c => { let s=0; for (let i=0;i<c.length;i+=8) s += c[i]*c[i]; return Math.sqrt(s/(c.length/8)); };
+  worklet.port.onmessage = ev => {
+    if (ev.data.type === "level") { $("meter").value = Math.min(0.1, ev.data.value); return; }
+    if (!running) return;
+    const c = ev.data.samples;
+    recordChunks.push(c.slice());
+    buf.push(c);
+    const secs = buf.length * CHUNK_SAMP / SR;
+    const e = energy(c);
+    if (e > Number($("level").value)) { silenceRun = 0; lastVoicedEnd = buf.length; }
+    else silenceRun += CHUNK_SAMP / SR;
+    const silenceTail = Math.min(silenceRun, secs - (lastVoicedEnd<0 ? 0 : (buf.length-lastVoicedEnd)*CHUNK_SAMP/SR));
+    const boundary = lastVoicedEnd > 0 && silenceTail >= SILENCE_SEC && secs >= MIN_SUBMIT_SEC;
+    if (boundary || secs >= CHUNK_SEC) {
+      // trim trailing silence (keep a little as context), keep 1.5s overlap tail
+      let end = boundary ? lastVoicedEnd : buf.length;
+      const overlapChunks = Math.round(OVERLAP_SEC * SR / CHUNK_SAMP);
+      const submit = buf.slice(0, end);
+      const tail = buf.slice(Math.max(0, end - overlapChunks));
+      buf = tail;
+      silenceRun = 0; lastVoicedEnd = 0;
+      if (submit.length * CHUNK_SAMP / SR < 0.4) return; // pure silence, drop
+      if (queue.length >= MAX_QUEUE) { queue.shift(); dropped++; setStatus("buffer full", `${dropped} old chunk(s) dropped`); }
+      queue.push(encodeWav(submit, SR));
+      pump();
+    }
+  };
+  src.connect(worklet); worklet.connect(audioCtx.destination);
+  setStatus(which === "mic" ? "listening (mic)" : "listening (tab audio)");
+}
+
+async function stop() {
+  running = false;
+  if (worklet) { worklet.port.postMessage("flush"); worklet.disconnect(); }
+  if (audioCtx) audioCtx.close();
+  $("meter").value = 0;
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  // Drain pending chunks so the lecture tail is not lost.
+  while (queue.length || busy) { await new Promise(r => setTimeout(r, 200)); }
+  $("btnMic").disabled = $("btnTab").disabled = false; $("btnStop").disabled = true;
+  $("float").style.display = "none";
+  worklet = null; audioCtx = null; stream = null;
+  setStatus("stopped");
+}
+
+function encodeWav(chunks, sr) {
+  const n = chunks.reduce((a,c)=>a+c.length,0);
+  const pcm = new Float32Array(n);
+  let off = 0; for (const c of chunks) { pcm.set(c, off); off += c.length; }
+  const ab = new ArrayBuffer(44 + n*2), v = new DataView(ab);
+  const ws = (o,s)=>{for(let i=0;i<s.length;i++)v.setUint8(o+i,s.charCodeAt(i));};
+  ws(0,"RIFF"); v.setUint32(4,36+n*2,true); ws(8,"WAVE"); ws(12,"fmt ");
+  v.setUint32(16,16,true); v.setUint16(20,1,true); v.setUint16(22,1,true);
+  v.setUint32(24,sr,true); v.setUint32(28,sr*2,true); v.setUint16(32,2,true);
+  v.setUint16(34,16,true); ws(36,"data"); v.setUint32(40,n*2,true);
+  for (let i=0;i<n;i++) { const s=Math.max(-1,Math.min(1,pcm[i])); v.setInt16(44+i*2, s<0?s*0x8000:s*0x7FFF, true); }
+  return new Blob([ab], {type:"audio/wav"});
+}
+
+let lastText = "";
+function dedupe(prev, next) { // remove overlap-repeated leading words
+  if (!prev || !next) return next;
+  const pw = prev.split(/\s+/).filter(Boolean), nw = next.split(/\s+/).filter(Boolean);
+  const maxK = Math.min(pw.length, nw.length, 12);
+  for (let k = maxK; k >= 2; k--) {
+    const tail = pw.slice(-k).join(" ").toLowerCase();
+    const head = nw.slice(0, k).join(" ").toLowerCase();
+    if (tail === head) return nw.slice(k).join(" ") || next;
+  }
+  return next;
+}
+
+async function pump() {
+  if (busy || !queue.length) return;
+  busy = true;
+  const blob = queue.shift();
+  try {
+    const t0 = performance.now();
+    const fd = new FormData(); fd.append("file", blob, "chunk.wav");
+    fd.append("language", $("language").value);
+    const r1 = await fetch("/api/transcribe", {method:"POST", body:fd});
+    if (!r1.ok) throw new Error(`transcribe HTTP ${r1.status}`);
+    const j1 = await r1.json();
+    if (!j1.text) { setStatus("listening", "silence"); return; }
+    j1.text = dedupe(lastText, j1.text);
+    if (!j1.text) { setStatus("listening", "overlap only"); return; }
+    lastText = j1.text;
+    const r2 = await fetch("/api/translate", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({text:j1.text, context:history.slice(-3).join(" "), target:$("target").value})
+    });
+    if (!r2.ok) throw new Error(`translate HTTP ${r2.status}`);
+    const j2 = await r2.json();
+    history.push(j1.text); if (history.length > 12) history.shift();
+    original.push(j1.text);
+    lines.push({orig: j1.text, zh: j2.text, lang: j1.language});
+    addLine(j1.text, j2.text, j1.language, (performance.now()-t0)/1000);
+  } catch (e) { setStatus("error: " + e.message); }
+  finally { busy = false; if (queue.length) pump(); }
+}
+
+function addLine(orig, zh, lang, secs) {
+  const d = document.createElement("div"); d.className = "line";
+  d.innerHTML = `<div class="orig">${lang||"?"} · ${secs.toFixed(1)}s · ${escapeHtml(orig)}</div><div class="zh">${escapeHtml(zh)}</div>`;
+  $("subs").prepend(d);
+  while ($("subs").children.length > 40) $("subs").lastChild.remove();
+  $("fOrig").textContent = orig; $("fZh").textContent = zh;
+  $("float").style.display = "block";
+  $("hud").textContent = `${secs.toFixed(1)}s latency`;
+  setStatus(mode === "mic" ? "listening (mic)" : "listening (tab audio)");
+}
+function escapeHtml(s){return (s||"").replace(/[&<>"']/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));}
+async function createSession() {
+  const r = await fetch("/api/sessions", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({title:$("sessionTitle").value, language:$("language").value})});
+  const s = await r.json(); sessionId = s.id; $("sessionLabel").textContent = s.title;
+}
+async function askAI() {
+  if (!$("question").value.trim() || !original.length) return setStatus("需要问题和课堂原文");
+  setStatus("asking AI..."); const r = await fetch("/api/ask", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({question:$("question").value, context:original.join(" "), target:$("target").value})});
+  const j = await r.json(); if (r.ok) addLine("AI回答", j.text, "", 0); else setStatus("ask failed");
+}
+async function extractTerms() {
+  if (!original.length) return setStatus("nothing to analyze");
+  setStatus("extracting terms...");
+  const r = await fetch("/api/terms", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({text:original.join(" "), target:$("target").value})});
+  const j = await r.json(); if (!r.ok) return setStatus("terms failed");
+  addLine("术语表", j.terms.map(x=>`${x.term}: ${x.explanation}`).join("\n"), "", 0);
+}
+const lines = []; // single source of truth: {orig, zh, lang}
+function exportMarkdown() {
+  const text = `# ${$("sessionTitle").value || "Lecture"}\n\n## 原文\n${original.join(" ")}\n\n## 翻译\n${lines.map(l=>l.zh).join("\n")}`;
+  const a=document.createElement("a"); a.href=URL.createObjectURL(new Blob([text],{type:"text/markdown"})); a.download="lecture-notes.md"; a.click(); URL.revokeObjectURL(a.href);
+}
+async function saveRecord() {
+  if (busy || queue.length) await new Promise(r => setTimeout(r, 400)); // let the tail finish
+  if (!recordChunks.length) return setStatus("nothing to save");
+  const blob = encodeWav(recordChunks, SR);
+  const fd = new FormData(); fd.append("audio", blob, "lecture.wav");
+  fd.append("transcript", original.join(" ")); fd.append("language", $("language").value);
+  const r = await fetch("/api/save", {method:"POST", body:fd});
+  setStatus(r.ok ? "saved recording + original transcript" : "save failed");
+}
+async function organize() {
+  if (!original.length) return setStatus("nothing to organize");
+  setStatus("organizing with AI...");
+  const r = await fetch("/api/organize", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({text:original.join(" "), target:$("target").value})});
+  const j = await r.json();
+  if (r.ok) { const d=document.createElement("div"); d.className="line"; d.innerHTML=`<div class="orig">AI整理（原文已保留）</div><div class="zh">${escapeHtml(j.text)}</div>`; $("subs").prepend(d); setStatus("AI notes ready"); }
+  else setStatus("organize failed");
+}
+async function loadConfig() {
+  try { const c = await (await fetch("/api/config")).json(); $("apiUrl").value = c.url; $("apiModel").value = c.model; } catch {}
+}
+$("saveConfig").onclick = async () => {
+  setStatus("saving config...");
+  const r = await fetch("/api/config", {method:"POST", headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({url:$("apiUrl").value, model:$("apiModel").value})});
+  if (!r.ok) return setStatus("config failed");
+  const j = await r.json(); setStatus("config saved", j.model);
+};
+
+$("btnMic").onclick = () => start("mic");
+$("btnTab").onclick = () => start("tab");
+$("btnStop").onclick = () => stop();
+$("newSession").onclick = createSession; $("askBtn").onclick = askAI; $("exportBtn").onclick = exportMarkdown; $("termsBtn").onclick = extractTerms;
+$("captionBtn").onclick = () => { window.open("ms-settings:easeofaccess-captions", "_blank"); };
+$("level").oninput = e => setStatus("threshold", Number(e.target.value).toFixed(3));
+$("checkBtn").onclick = async () => { setStatus("checking..."); try { const r=await fetch("/api/self-check"); const h=await r.json(); setStatus(h.ready ? "ready" : "check failed", `ollama=${h.ollama} model=${h.model}`); } catch(e) { setStatus("backend unreachable"); } };
+loadConfig();
+fetch("/api/self-check").then(r=>r.json()).then(h=>setStatus(h.ready ? "ready" : "check failed", `ollama=${h.ollama} model=${h.model}`))
+  .catch(()=>setStatus("backend unreachable"));
+</script>
+</body>
+</html>
