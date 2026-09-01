@@ -94,6 +94,41 @@ def set_config(req: ConfigReq):
     return {k: CONFIG[k] for k in ("url", "model", "ai_base", "ai_key", "ai_model")}
 
 
+# ---- token economy for the cloud AI ----
+ASK_CONTEXT_CHARS = 4000     # window of lecture text sent with questions
+LONGTEXT_HEAD = 2000         # organize/terms: keep the head...
+LONGTEXT_TAIL = 10000        # ...and the tail of over-long input
+TRANSLATE_CONTEXT_CHARS = 400
+
+_translation_cache = {}  # norm(text)+target+ctx-hash -> (translation, backend)
+
+
+def _cache_key(text, target, context):
+    norm = "".join(ch for ch in text.lower() if ch.isalnum())
+    ctx = str(hash("".join(ch for ch in (context or "").lower() if ch.isalnum())) % 100000)
+    return f"{norm}|{target}|{ctx}"
+
+
+def cache_get(key):
+    hit = _translation_cache.get(key)
+    if hit is not None:  # refresh LRU order
+        _translation_cache[key] = hit
+    return hit
+
+
+def cache_put(key, value):
+    _translation_cache[key] = value
+    while len(_translation_cache) > 500:
+        _translation_cache.pop(next(iter(_translation_cache)))
+
+
+def cap_long_text(text):
+    """Bound token usage for whole-lecture inputs: keep head+tail."""
+    if len(text) <= LONGTEXT_HEAD + LONGTEXT_TAIL:
+        return text
+    return text[:LONGTEXT_HEAD] + "\n[...中间内容省略...]\n" + text[-LONGTEXT_TAIL:]
+
+
 async def ai_complete(prompt: str, json_mode: bool = False, timeout_s: int = 120):
     """AI Q&A backend: any OpenAI-compatible web AI when an API key is
     configured (DeepSeek, GLM-4-Flash free tier, Groq, OpenRouter, ...),
@@ -128,8 +163,11 @@ async def ai_complete(prompt: str, json_mode: bool = False, timeout_s: int = 120
 async def ask(req: AskReq):
     if not req.question.strip() or not req.context.strip():
         raise HTTPException(400, "question and context are required")
+    context = req.context.strip()
+    if len(context) > ASK_CONTEXT_CHARS:  # recent window, not the whole lecture
+        context = "[...较早内容省略...]" + context[-ASK_CONTEXT_CHARS:]
     prompt = ("只根据下面的课堂原文回答问题。无法从原文确定时明确说不知道，禁止编造。"
-              f"用{req.target}回答，并引用相关原文。\n问题：{req.question}\n课堂原文：{req.context}")
+              f"用{req.target}回答，并引用相关原文。\n问题：{req.question}\n课堂原文：{context}")
     try:
         text, backend = await ai_complete(prompt)
         return {"text": text, "model": backend}
@@ -195,7 +233,7 @@ async def terms(req: OrganizeReq):
     # object shape {"terms": [...]} instead of a bare array
     prompt = (f"从以下讲座原文提取所有重要专业术语（最多20个）。"
               f"输出一个JSON对象：{{\"terms\": [{{\"term\": \"英文术语\", \"explanation\": \"用{req.target}给出的中文解释\"}}]}}。"
-              f"每个术语都要包含，不要编造。\n原文：\n{req.text}")
+              f"每个术语都要包含，不要编造。\n原文：\n{cap_long_text(req.text)}")
     try:
         text, _ = await ai_complete(prompt, json_mode=True)
         value = json.loads(text)
@@ -280,7 +318,7 @@ async def organize(req: OrganizeReq):
     prompt = (
         f"整理以下讲座原文，输出{req.target}的结构化笔记。保留专业术语和关键事实，"
         "不要编造内容。输出：1.核心要点 2.术语 3.待确认问题。只输出整理结果。\n\n"
-        + req.text
+        + cap_long_text(req.text)
     )
     try:
         text, backend = await ai_complete(prompt)
@@ -328,7 +366,13 @@ async def translate_text(text: str, target: str, context: str = "") -> tuple[str
     an AI key is configured the AI interpreter version races it in a
     parallel task and wins if it lands within AI_TRANSLATE_GRACE seconds —
     latency is bounded by machine translation, quality by the AI. Ollama
-    is the offline last resort."""
+    is the offline last resort. Results are cached: repeated sentences
+    (lectures repeat a lot) cost zero tokens and zero latency."""
+    context = (context or "")[-TRANSLATE_CONTEXT_CHARS:]
+    key = _cache_key(text, target, context)
+    hit = cache_get(key)
+    if hit is not None:
+        return hit[0], "cache"
     to = CLOUD_TARGET.get(target, "zh-CN")
     mt_text = None
     for cloud in (google_translate, mymemory_translate):
@@ -356,6 +400,7 @@ async def translate_text(text: str, target: str, context: str = "") -> tuple[str
             try:
                 out, backend = await asyncio.wait_for(ai_task, timeout=12)
                 if out:
+                    cache_put(key, (out, backend))
                     return out, backend
             except Exception as e:
                 log.warning("AI translation failed: %s", e)
@@ -364,9 +409,11 @@ async def translate_text(text: str, target: str, context: str = "") -> tuple[str
             if ai_task in done and not ai_task.exception() and ai_task.result()[0]:
                 out, backend = ai_task.result()
                 if out:
+                    cache_put(key, (out, backend))
                     return out, backend
             ai_task.cancel()
     if mt_text:
+        cache_put(key, (mt_text, "machine"))
         return mt_text, "machine"
     prompt = (
         "You are a professional live subtitle translator for university lectures. "
