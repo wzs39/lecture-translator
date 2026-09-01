@@ -52,7 +52,9 @@ assert limits["live_caption_limit"] == 500 and limits["translation_cache_limit"]
 # --- page ----------------------------------------------------------------
 page = urllib.request.urlopen(HOST + "/").read().decode()
 assert all(m in page for m in ["实时字幕", "字幕桥", "问 AI", "导出 Markdown",
-                               "saveDoc", "ankiBtn", "statsBtn", "本地 Ollama"])
+                               "saveDoc", "ankiBtn", "statsBtn", "本地 Ollama",
+                               "分类管理", "AI 总结", "saveSummaryBtn",
+                               "addCategoryBtn", "summaryList"])
 
 # --- real model paths ----------------------------------------------------
 assert post("/api/translate", {"text": "Our next lecture covers chapter five."})["text"]
@@ -123,6 +125,25 @@ post("/api/captions", {"text": f"The hunchback {marker} rang the bell.", "offset
 assert any(marker in h["text"] and h["session"] == "Search"
            for h in get(f"/api/search?q={urllib.parse.quote(marker)}")["hits"])
 assert any(x["title"] == "Search" and x["segments"] >= 1 for x in get("/api/stats")["courses"])
+
+# --- categories: CRUD + courses/summaries follow rename & delete ---------
+assert "ContractCat" in post("/api/categories", {"name": "ContractCat"})["categories"]
+scat = post("/api/sessions", {"title": "CatSession", "category": "ContractCat"})["id"]
+post(f"/api/sessions/{scat}/activate")
+sumid = post("/api/summaries", {"category": "ContractCat", "title": "Sum",
+                                "text": "classified notes"})["id"]
+assert any(s["id"] == sumid for s in get("/api/summaries?category=ContractCat")["summaries"])
+assert get(f"/api/summaries/{sumid}")["text"] == "classified notes"
+post("/api/categories", {"name": "ContractCat", "new_name": "ContractRenamed"}, "PATCH")
+assert "ContractRenamed" in get("/api/categories")["categories"]
+assert get(f"/api/sessions/{scat}")["category"] == "ContractRenamed"
+assert get(f"/api/summaries/{sumid}")["category"] == "ContractRenamed"
+post("/api/categories", {"name": "ContractRenamed", "new_name": "ContractGone"}, "PATCH")
+expect(200, "/api/categories?name=ContractGone", "DELETE")
+assert get(f"/api/sessions/{scat}")["category"] == "未分类"
+assert get(f"/api/summaries/{sumid}")["category"] == "未分类"
+expect(200, f"/api/summaries/{sumid}", "DELETE")
+expect(404, f"/api/summaries/{sumid}")
 
 # --- error boundaries -----------------------------------------------------
 post("/api/config", {"ai_key": "", "ai_base": "http://127.0.0.1:9"})

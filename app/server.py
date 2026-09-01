@@ -714,6 +714,160 @@ def activate_session(sid: str):
     return {"active": sid}
 
 
+# ---- categories & AI summaries (classified notes) ----
+
+class CategoryReq(BaseModel):
+    name: str
+
+
+class CategoryRenameReq(BaseModel):
+    name: str
+    new_name: str
+
+
+class SummaryReq(BaseModel):
+    category: str = "未分类"
+    title: str = "AI 整理"
+    text: str
+
+
+CATEGORIES_FILE = DATA_DIR / "categories.json"
+SUMMARIES_FILE = DATA_DIR / "summaries.json"
+
+
+def _load_json(path: Path, default):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return default
+
+
+def _save_json(path: Path, data):
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _categories() -> list:
+    cats = set(_load_json(CATEGORIES_FILE, []))
+    for p in DATA_DIR.glob("session-*.json"):
+        try:
+            cats.add(json.loads(p.read_text(encoding="utf-8")).get("category", "未分类"))
+        except (OSError, json.JSONDecodeError):
+            pass
+    for s in _load_json(SUMMARIES_FILE, {"summaries": []}).get("summaries", []):
+        cats.add(s.get("category", "未分类"))
+    return sorted(cats)
+
+
+@app.get("/api/categories")
+def list_categories():
+    return {"categories": _categories()}
+
+
+@app.post("/api/categories")
+def create_category(req: CategoryReq):
+    name = req.name.strip()
+    if not name:
+        raise HTTPException(400, "分类名不能为空")
+    cats = _load_json(CATEGORIES_FILE, [])
+    if name not in cats:
+        cats.append(name)
+        _save_json(CATEGORIES_FILE, cats)
+    return {"categories": _categories()}
+
+
+@app.patch("/api/categories")
+def rename_category(req: CategoryRenameReq):
+    name, new_name = req.name.strip(), req.new_name.strip()
+    if not name or not new_name or name == new_name:
+        raise HTTPException(400, "old and new names required")
+    cats = _load_json(CATEGORIES_FILE, [])
+    if name not in cats:
+        raise HTTPException(404, "category not found")
+    cats = [new_name if c == name else c for c in cats]
+    _save_json(CATEGORIES_FILE, cats)
+    for p in DATA_DIR.glob("session-*.json"):  # courses keep their data
+        try:
+            s = json.loads(p.read_text(encoding="utf-8"))
+            if s.get("category") == name:
+                s["category"] = new_name
+                p.write_text(json.dumps(s, ensure_ascii=False, indent=2), encoding="utf-8")
+        except (OSError, json.JSONDecodeError):
+            pass
+    data = _load_json(SUMMARIES_FILE, {"summaries": []})
+    for s in data.get("summaries", []):
+        if s.get("category") == name:
+            s["category"] = new_name
+    _save_json(SUMMARIES_FILE, data)
+    return {"categories": _categories()}
+
+
+@app.delete("/api/categories")
+def delete_category(name: str):
+    cats = _load_json(CATEGORIES_FILE, [])
+    if name in cats:
+        cats.remove(name)
+        _save_json(CATEGORIES_FILE, cats)
+    for p in DATA_DIR.glob("session-*.json"):
+        try:
+            s = json.loads(p.read_text(encoding="utf-8"))
+            if s.get("category") == name:
+                s["category"] = "未分类"
+                p.write_text(json.dumps(s, ensure_ascii=False, indent=2), encoding="utf-8")
+        except (OSError, json.JSONDecodeError):
+            pass
+    data = _load_json(SUMMARIES_FILE, {"summaries": []})
+    for s in data.get("summaries", []):
+        if s.get("category") == name:
+            s["category"] = "未分类"
+    _save_json(SUMMARIES_FILE, data)
+    return {"categories": _categories()}
+
+
+@app.post("/api/summaries")
+def save_summary(req: SummaryReq):
+    if not req.text.strip():
+        raise HTTPException(400, "text is required")
+    data = _load_json(SUMMARIES_FILE, {"summaries": []})
+    record = {"id": uuid.uuid4().hex,
+              "category": req.category.strip() or "未分类",
+              "title": req.title.strip() or "AI 整理",
+              "text": req.text.strip()[:200000],
+              "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+    data.setdefault("summaries", []).append(record)
+    _save_json(SUMMARIES_FILE, data)
+    return record
+
+
+@app.get("/api/summaries")
+def list_summaries(category: str = ""):
+    items = _load_json(SUMMARIES_FILE, {"summaries": []}).get("summaries", [])
+    items = [s for s in items if not category or s.get("category") == category]
+    return {"summaries": [{"id": s["id"], "category": s.get("category", "未分类"),
+                            "title": s.get("title", "AI 整理"),
+                            "created_at": s.get("created_at", ""),
+                            "snippet": s.get("text", "")[:80]}
+                           for s in sorted(items, key=lambda x: x.get("created_at", ""), reverse=True)]}
+
+
+@app.get("/api/summaries/{sid}")
+def get_summary(sid: str):
+    for s in _load_json(SUMMARIES_FILE, {"summaries": []}).get("summaries", []):
+        if s.get("id") == sid:
+            return s
+    raise HTTPException(404, "summary not found")
+
+
+@app.delete("/api/summaries/{sid}")
+def delete_summary(sid: str):
+    data = _load_json(SUMMARIES_FILE, {"summaries": []})
+    before = len(data.get("summaries", []))
+    data["summaries"] = [s for s in data.get("summaries", []) if s.get("id") != sid]
+    if len(data["summaries"]) == before:
+        raise HTTPException(404, "summary not found")
+    _save_json(SUMMARIES_FILE, data)
+    return {"deleted": sid}
+
+
 @app.get("/api/health")
 async def health():
     ok_ollama = False

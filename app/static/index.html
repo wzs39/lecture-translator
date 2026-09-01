@@ -105,6 +105,11 @@
         <button id="organizeBtn" class="ghost">✨ AI整理（保留原文）</button>
         <button id="exportBtn" class="ghost">导出 Markdown</button>
       </div>
+      <div class="row" style="margin-top:6px">
+        <select id="summaryCategory"><option value="未分类">未分类</option></select>
+        <button id="saveSummaryBtn" class="ghost">💾 保存总结到分类</button>
+        <span id="summarySaveHint" style="color:var(--dim);font-size:12px">点 AI 整理后，再把总结存入某个分类</span>
+      </div>
       <textarea id="myNotes" placeholder="我的笔记（自己随手记，AI 不会覆盖；随课程保存）"
         style="width:100%;margin-top:10px;height:110px;background:#1b2735;color:var(--fg);border:1px solid #2a3b52;border-radius:8px;padding:8px;font-size:13px"></textarea>
       <div class="row" style="margin-top:6px">
@@ -157,6 +162,18 @@
     <span id="storageSummary" style="color:var(--dim);font-size:13px"></span>
   </div>
   <div id="storageList" style="margin-top:8px;font-size:13px"></div>
+  <div class="row" style="margin-top:10px">
+    <b style="font-size:13px">分类管理：</b>
+    <input id="newCategory" placeholder="新分类名，如：期末复习" style="min-width:140px">
+    <button id="addCategoryBtn" class="ghost">新建分类</button>
+    <span id="categoryList" style="font-size:12px"></span>
+  </div>
+  <div class="row" style="margin-top:8px">
+    <b style="font-size:13px">AI 总结：</b>
+    <select id="summaryCatFilter"><option value="">全部总结</option></select>
+    <button id="summaryRefresh" class="ghost">刷新</button>
+  </div>
+  <div id="summaryList" style="margin-top:6px;font-size:13px"></div>
   <div class="row" style="margin-top:12px">
     <input id="searchQ" placeholder="跨课程搜索关键词…" style="min-width:220px">
     <button id="searchBtn" class="ghost">搜索</button>
@@ -271,12 +288,16 @@ $("gAdd").onclick = async () => {
   loadGlossary();
 };
 
+let lastOrganizeText = "";
 async function organize() {
   if (!original.length) return setStatus("nothing to organize");
   setStatus("organizing with AI...");
   const r = await fetch("/api/organize", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({text:original.join(" "), target:"Chinese (Simplified)"})});
   const j = await r.json();
-  if (r.ok) addAiCard("AI整理（原文已保留）", j.text); else setStatus("organize failed");
+  if (!r.ok) return setStatus("organize failed");
+  lastOrganizeText = j.text;
+  addAiCard("AI整理（原文已保留）", j.text);
+  $("summarySaveHint").textContent = `已生成，可保存到分类（默认 ${$("summaryCategory").value}）`;
 }
 
 async function exportMarkdown() {
@@ -413,13 +434,94 @@ $("searchBtn").onclick = async () => {
     : `<div style="color:var(--dim)">无匹配结果</div>`;
 };
 
+// ---- categories & saved AI summaries ----
+async function loadCategories() {
+  const j = await (await fetch("/api/categories")).json();
+  const cats = j.categories;
+  const prevSummaryCat = $("summaryCategory").value;
+  $("categoryFilter").innerHTML = `<option value="">全部分类</option>` + cats.map(c => `<option>${escapeHtml(c)}</option>`).join("");
+  $("summaryCategory").innerHTML = `<option>未分类</option>` + cats.filter(c => c !== "未分类").map(c => `<option>${escapeHtml(c)}</option>`).join("");
+  if (prevSummaryCat) $("summaryCategory").value = prevSummaryCat;
+  $("summaryCatFilter").innerHTML = `<option value="">全部总结</option>` + cats.map(c => `<option>${escapeHtml(c)}</option>`).join("");
+  $("categoryList").innerHTML = cats.map(c =>
+    `<span class="chip" style="display:inline-block;border:1px solid var(--border);border-radius:10px;padding:1px 8px;margin:2px;font-size:12px">${escapeHtml(c)}` +
+    `<a href="#" data-rencat="${escapeHtml(c)}" title="重命名">✏️</a>` +
+    `<a href="#" data-delcat="${escapeHtml(c)}" title="删除分类">🗑</a></span>`).join("");
+  $("categoryList").querySelectorAll("[data-rencat]").forEach(a => a.onclick = async e => {
+    e.preventDefault();
+    const newName = prompt("重命名分类：", a.dataset.rencat);
+    if (!newName || newName === a.dataset.rencat) return;
+    const r = await fetch("/api/categories", {method:"PATCH", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({name: a.dataset.rencat, new_name: newName})});
+    if (!r.ok) return setStatus("rename failed");
+    loadStorage();
+  });
+  $("categoryList").querySelectorAll("[data-delcat]").forEach(a => a.onclick = async e => {
+    e.preventDefault();
+    if (!confirm(`删除分类“${a.dataset.delcat}”？课程和总结会归入“未分类”，数据不删除。`)) return;
+    const r = await fetch(`/api/categories?name=${encodeURIComponent(a.dataset.delcat)}`, {method:"DELETE"});
+    if (!r.ok) return setStatus("delete failed");
+    loadStorage();
+  });
+}
+
+async function loadSummaries() {
+  const cat = $("summaryCatFilter").value;
+  const j = await (await fetch(`/api/summaries?category=${encodeURIComponent(cat)}`)).json();
+  $("summaryList").innerHTML = j.summaries.length ? j.summaries.map(s =>
+    `<div class="row" style="margin:4px 0;align-items:flex-start">` +
+    `<b>${escapeHtml(s.title)}</b><span style="color:var(--dim)">${escapeHtml(s.category)} · ${s.created_at.slice(0,16).replace("T"," ")}</span>` +
+    `<span style="color:var(--dim);max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(s.snippet)}…</span>` +
+    `<button class="ghost" data-view="${s.id}" style="padding:2px 8px;font-size:12px">查看</button>` +
+    `<button class="ghost" data-delsum="${s.id}" style="padding:2px 8px;font-size:12px">删除</button></div>`).join("")
+    : `<div style="color:var(--dim)">还没有保存的 AI 总结</div>`;
+  $("summaryList").querySelectorAll("[data-view]").forEach(btn => btn.onclick = async () => {
+    const s = await (await fetch(`/api/summaries/${btn.dataset.view}`)).json();
+    if (btn.dataset.open) {
+      btn.parentElement.querySelector(".sumtext").remove();
+      btn.dataset.open = ""; btn.textContent = "查看";
+    } else {
+      const div = document.createElement("div"); div.className = "sumtext";
+      div.style.cssText = "white-space:pre-wrap;margin:4px 0 8px;padding:6px;background:var(--bg2);border-radius:6px";
+      div.textContent = s.text;
+      btn.parentElement.appendChild(div);
+      btn.dataset.open = "1"; btn.textContent = "收起";
+    }
+  });
+  $("summaryList").querySelectorAll("[data-delsum]").forEach(btn => btn.onclick = async () => {
+    if (!confirm("删除这条 AI 总结？")) return;
+    await fetch(`/api/summaries/${btn.dataset.delsum}`, {method:"DELETE"});
+    loadSummaries();
+  });
+}
+
+$("addCategoryBtn").onclick = async () => {
+  const name = $("newCategory").value.trim();
+  if (!name) return;
+  const r = await fetch("/api/categories", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({name})});
+  if (!r.ok) return setStatus("create category failed");
+  $("newCategory").value = "";
+  loadStorage();
+};
+$("saveSummaryBtn").onclick = async () => {
+  if (!lastOrganizeText) return setStatus("no organized text yet — 先点 AI 整理", "");
+  const cat = $("summaryCategory").value || "未分类";
+  const r = await fetch("/api/summaries", {method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({category: cat, title: `AI 整理 ${new Date().toISOString().slice(0,10)}`, text: lastOrganizeText})});
+  if (!r.ok) return setStatus("save summary failed");
+  $("summarySaveHint").textContent = `✅ 已保存到「${cat}」，去 ⑥ 存储管理按分类复看`;
+  if (cat !== $("summaryCatFilter").value) return;
+  loadSummaries();
+};
+$("summaryRefresh").onclick = loadSummaries;
+$("summaryCatFilter").onchange = loadSummaries;
+
 // ---- storage management ----
 const fmtSize = n => n > 1048576 ? (n/1048576).toFixed(1)+" MB" : n > 1024 ? (n/1024).toFixed(1)+" KB" : n+" B";
 async function loadStorage() {
   try {
+    await loadCategories();
     const s = await (await fetch("/api/storage")).json();
-    const categories = [...new Set(s.sessions.map(x => x.category || "未分类"))].sort();
-    $("categoryFilter").innerHTML = `<option value="">全部分类</option>` + categories.map(c => `<option>${escapeHtml(c)}</option>`).join("");
     const selected = $("categoryFilter").dataset.selected || "";
     $("categoryFilter").value = selected;
     const showArchived = $("showArchived").checked;
