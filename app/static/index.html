@@ -82,6 +82,10 @@
   <div class="col">
     <div class="panel">
       <div class="step">字幕流（原文 + 翻译）</div>
+      <div class="row" style="margin-bottom:10px">
+        <button id="saveTranscript" class="ghost">💾 保存翻译记录</button>
+        <span style="color:var(--dim);font-size:12px">下载 当前课程 的全部原文+翻译（TXT）</span>
+      </div>
       <div id="subs"></div>
     </div>
   </div>
@@ -96,6 +100,12 @@
         <button id="termsBtn" class="ghost">提取术语</button>
         <button id="organizeBtn" class="ghost">✨ AI整理（保留原文）</button>
         <button id="exportBtn" class="ghost">导出 Markdown</button>
+      </div>
+      <textarea id="myNotes" placeholder="我的笔记（自己随手记，AI 不会覆盖；随课程保存）"
+        style="width:100%;margin-top:10px;height:110px;background:#1b2735;color:var(--fg);border:1px solid #2a3b52;border-radius:8px;padding:8px;font-size:13px"></textarea>
+      <div class="row" style="margin-top:6px">
+        <button id="saveNotes" class="ghost">保存笔记到课程</button>
+        <span id="notesHint" style="color:var(--dim);font-size:12px"></span>
       </div>
       <div id="aiOut"></div>
     </div>
@@ -117,6 +127,7 @@
     <input id="aiKey" type="password" placeholder="API Key" style="min-width:160px">
     <input id="aiModelName" placeholder="模型名，如 glm-4-flash / deepseek-chat" style="min-width:230px">
     <button id="saveAi" class="ghost">保存云端 AI</button>
+    <button id="detectBtn" class="ghost">自动识别模型</button>
   </div>
   <div class="row" style="margin-top:6px">
     <span id="aiHint" style="color:var(--dim);font-size:12px">不填 Key 时问 AI / 整理 / 术语使用本地 Qwen；填入免费 Key 后由云端大模型回答，失败仍自动回退本地。</span>
@@ -179,6 +190,7 @@ async function createSession() {
   const s = await r.json(); sessionId = s.id;
   $("sessionLabel").textContent = s.title;
   await fetch(`/api/sessions/${sessionId}/activate`, {method:"POST"});
+  $("myNotes").value = "";
   setStatus("course ready", "captions will be saved into this session");
 }
 
@@ -211,7 +223,8 @@ async function exportMarkdown() {
     try { const s = await (await fetch(`/api/sessions/${sessionId}`)).json(); if (s.transcript.length) transcript = s.transcript; } catch {}
   }
   const body = transcript.map(t => t.offset == null ? `- ${t.text}\n  ${t.zh ?? t.translation}` : `- [${fmtTs(t.offset)}] ${t.text}\n  ${t.zh ?? t.translation}`).join("\n");
-  const text = `# ${$("sessionTitle").value || "Lecture"}\n\n## 原文 / 翻译\n${body}`;
+  const notes = $("myNotes").value.trim();
+  const text = `# ${$("sessionTitle").value || "Lecture"}\n\n## 原文 / 翻译\n${body}` + (notes ? `\n\n## 我的笔记\n${notes}` : "");
   const a=document.createElement("a"); a.href=URL.createObjectURL(new Blob([text],{type:"text/markdown"})); a.download="lecture-notes.md"; a.click(); URL.revokeObjectURL(a.href);
 }
 
@@ -228,8 +241,48 @@ $("saveConfig").onclick = async () => {
     body:JSON.stringify({url:$("apiUrl").value, model:$("apiModel").value})});
   if (!r.ok) return setStatus("config failed");
   const j = await r.json(); setStatus("config saved", j.model);
+};$( "detectBtn").onclick = async () => {
+  setStatus("detecting models...");
+  // save current fields first so the server detects what's on screen
+  await fetch("/api/config", {method:"POST", headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({ai_base:$("aiBase").value, ai_key:$("aiKey").value, ai_model:$("aiModelName").value})});
+  try {
+    const r = await fetch("/api/ai/detect");
+    const j = await r.json();
+    if (!r.ok) return setStatus("识别失败", j.detail || "");
+    if (j.suggested) $("aiModelName").value = j.suggested;
+    $("aiHint").textContent = `识别到 ${j.count} 个可用模型，已选用 ${j.suggested}。可用：${j.models.slice(0,6).join(", ")}${j.models.length>6?" ...":""}`;
+    setStatus("models detected", `${j.count} 个`);
+  } catch(e) { setStatus("detect failed: " + e.message); }
 };
-$("saveAi").onclick = async () => {
+
+// ---- student notes (never touched by AI) ----
+async function loadNotes() {
+  if (!sessionId) return;
+  try {
+    const s = await (await fetch(`/api/sessions/${sessionId}`)).json();
+    const n = s.notes; $("myNotes").value = Array.isArray(n) ? "" : (n || "");
+  } catch {}
+}
+$("saveNotes").onclick = async () => {
+  if (!sessionId) return setStatus("请先新建课程，笔记随课程保存");
+  const r = await fetch(`/api/sessions/${sessionId}/notes`, {method:"POST", headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({notes:$("myNotes").value})});
+  $("notesHint").textContent = r.ok ? `已保存 ${new Date().toLocaleTimeString()}` : "保存失败";
+};
+
+// download the persisted transcript (original + translation) as TXT
+$("saveTranscript").onclick = async () => {
+  let transcript = lines;
+  if (sessionId) { try { const s = await (await fetch(`/api/sessions/${sessionId}`)).json(); if (s.transcript.length) transcript = s.transcript; } catch {} }
+  if (!transcript.length) return setStatus("暂无翻译内容");
+  const body = transcript.map(t => `[${t.offset != null ? fmtTs(t.offset) : "--:--"}] ${t.text}\n${t.zh ?? t.translation}`).join("\n\n");
+  const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([body], {type:"text/plain;charset=utf-8"}));
+  a.download = "translation.txt"; a.click(); URL.revokeObjectURL(a.href);
+  setStatus("translation saved", `${transcript.length} 段`);
+};
+
+$( "saveAi").onclick = async () => {
   setStatus("saving cloud AI...");
   const r = await fetch("/api/config", {method:"POST", headers:{"Content-Type":"application/json"},
     body:JSON.stringify({ai_base:$("aiBase").value, ai_key:$("aiKey").value, ai_model:$("aiModelName").value})});

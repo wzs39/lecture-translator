@@ -129,6 +129,38 @@ def cap_long_text(text):
     return text[:LONGTEXT_HEAD] + "\n[...中间内容省略...]\n" + text[-LONGTEXT_TAIL:]
 
 
+@app.get("/api/ai/detect")
+async def detect_models():
+    """Auto-detect available models from the configured cloud AI service."""
+    if not CONFIG["ai_key"]:
+        raise HTTPException(400, "请先填写 API Key")
+    try:
+        async with httpx.AsyncClient(timeout=10) as cx:
+            r = await cx.get(f"{CONFIG['ai_base']}/models",
+                             headers={"Authorization": f"Bearer {CONFIG['ai_key']}"})
+            r.raise_for_status()
+            ids = [m.get("id") for m in r.json().get("data", []) if m.get("id")]
+    except Exception as e:
+        raise HTTPException(502, f"识别失败（检查接口地址和 Key）：{e}")
+    prefer = ("chat", "flash", "mini", "turbo", "air")
+    suggested = next((i for i in ids if any(k in i.lower() for k in prefer)), ids[0] if ids else "")
+    return {"models": ids, "suggested": suggested, "count": len(ids)}
+
+
+class NotesReq(BaseModel):
+    notes: str = ""
+
+
+@app.post("/api/sessions/{sid}/notes")
+def save_session_notes(sid: str, req: NotesReq):
+    """Save the student's own notes; AI output never overwrites them."""
+    path = _session_path(sid)
+    session = json.loads(path.read_text(encoding="utf-8"))
+    session["notes"] = req.notes
+    path.write_text(json.dumps(session, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"saved": True, "chars": len(req.notes)}
+
+
 async def ai_complete(prompt: str, json_mode: bool = False, timeout_s: int = 120):
     """AI Q&A backend: any OpenAI-compatible web AI when an API key is
     configured (DeepSeek, GLM-4-Flash free tier, Groq, OpenRouter, ...),
@@ -179,7 +211,7 @@ async def ask(req: AskReq):
 def create_session(req: SessionReq):
     sid = uuid.uuid4().hex
     path = DATA_DIR / f"session-{sid}.json"
-    path.write_text(json.dumps({"id": sid, "title": req.title.strip() or "Untitled lecture", "language": req.language, "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "transcript": [], "notes": [], "terms": []}, ensure_ascii=False, indent=2), encoding="utf-8")
+    path.write_text(json.dumps({"id": sid, "title": req.title.strip() or "Untitled lecture", "language": req.language, "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "transcript": [], "notes": "", "terms": []}, ensure_ascii=False, indent=2), encoding="utf-8")
     return json.loads(path.read_text(encoding="utf-8"))
 
 
