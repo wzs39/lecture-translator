@@ -38,4 +38,18 @@ try:
     raise SystemExit("unknown session should 404")
 except urllib.error.HTTPError as e:
     assert e.code == 404
+
+# storage management: snapshot lists the session; deletion removes it
+snap = get_json("/api/storage")
+assert any(s["id"] == sid for s in snap["sessions"]), "created session must appear in storage"
+assert "captions_log" in snap and "total_size" in snap
+req = urllib.request.Request(HOST + f"/api/sessions/{sid}", method="DELETE")
+assert json.load(urllib.request.urlopen(req, timeout=60)) == {"deleted": sid}
+snap = get_json("/api/storage")
+assert not any(s["id"] == sid for s in snap["sessions"]), "deleted session must vanish"
+try:
+    get_json(f"/api/sessions/{sid}")
+    raise SystemExit("deleted session should 404")
+except urllib.error.HTTPError as e:
+    assert e.code == 404
 print("lecture translator contract: passed")

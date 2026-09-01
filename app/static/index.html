@@ -103,6 +103,16 @@
   </div>
 </div>
 
+<div class="section">
+  <div class="step">⑥ 存储管理</div>
+  <div class="row">
+    <button id="storageRefresh" class="ghost">刷新占用</button>
+    <button id="clearLog" class="ghost">清空字幕日志</button>
+    <span id="storageSummary" style="color:var(--dim);font-size:13px"></span>
+  </div>
+  <div id="storageList" style="margin-top:8px;font-size:13px"></div>
+</div>
+
 <div id="subs"></div>
 <div id="hud"></div>
 
@@ -207,6 +217,32 @@ $("saveAi").onclick = async () => {
   setStatus("cloud AI saved", $("aiModelName").value || "local only");
 };
 
+// ---- storage management ----
+const fmtSize = n => n > 1048576 ? (n/1048576).toFixed(1)+" MB" : n > 1024 ? (n/1024).toFixed(1)+" KB" : n+" B";
+async function loadStorage() {
+  try {
+    const s = await (await fetch("/api/storage")).json();
+    $("storageSummary").textContent = `课程 ${s.sessions.length} 门 · 字幕日志 ${s.captions_log.lines} 行 · 合计 ${fmtSize(s.total_size)}`;
+    $("storageList").innerHTML = s.sessions.map(x =>
+      `<div class="row" style="margin:4px 0">
+         <span style="min-width:200px">${escapeHtml(x.title || x.id)}</span>
+         <span style="color:var(--dim)">${x.created.slice(0,16).replace("T"," ")} · ${x.segments} 段 · ${fmtSize(x.size)}</span>
+         <button class="ghost" data-del="${x.id}" style="padding:2px 10px;font-size:12px">删除</button>
+       </div>`).join("") || `<div style="color:var(--dim)">暂无课程会话</div>`;
+    $("storageList").querySelectorAll("[data-del]").forEach(btn => btn.onclick = async () => {
+      if (!confirm("确定删除这门课程的全部记录？不可恢复。")) return;
+      await fetch(`/api/sessions/${btn.dataset.del}`, {method:"DELETE"});
+      loadStorage();
+    });
+  } catch { $("storageSummary").textContent = "加载失败"; }
+}
+$("storageRefresh").onclick = loadStorage;
+$("clearLog").onclick = async () => {
+  if (!confirm("清空字幕日志（不影响课程会话）？")) return;
+  await fetch("/api/captions-log", {method:"DELETE"});
+  loadStorage();
+};
+
 $("newSession").onclick = createSession; $("askBtn").onclick = askAI; $("exportBtn").onclick = exportMarkdown;
 $("termsBtn").onclick = extractTerms; $("organizeBtn").onclick = organize;
 $( "captionBtn").onclick = () => { window.open("ms-settings:easeofaccess-captions", "_blank"); };
@@ -258,6 +294,7 @@ $("speechBtn").onclick = () => {
 $("speechStop").onclick = stopSpeech;
 $("checkBtn").onclick = async () => { setStatus("checking..."); try { const r=await fetch("/api/self-check"); const h=await r.json(); setStatus(h.ready ? "ready" : "check failed", `ollama=${h.ollama} model=${h.model}`); } catch(e) { setStatus("backend unreachable"); } };
 loadConfig();
+loadStorage();
 fetch("/api/self-check").then(r=>r.json()).then(h=>setStatus(h.ready ? "ready" : "check failed", `ollama=${h.ollama} model=${h.model}`))
   .catch(()=>setStatus("backend unreachable"));
 </script>

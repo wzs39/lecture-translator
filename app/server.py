@@ -209,6 +209,52 @@ async def terms(req: OrganizeReq):
         raise HTTPException(502, f"terms backend: {e}")
 
 
+# ---- storage management ----
+
+def _storage_snapshot():
+    sessions = []
+    for p in DATA_DIR.glob("session-*.json"):
+        try:
+            s = json.loads(p.read_text(encoding="utf-8"))
+            sessions.append({"id": s["id"], "title": s.get("title", ""),
+                             "created": s.get("created_at", ""),
+                             "segments": len(s.get("transcript", [])),
+                             "size": p.stat().st_size})
+        except (OSError, json.JSONDecodeError):
+            continue
+    log = DATA_DIR / "captions-log.jsonl"
+    log_info = {"lines": 0, "size": 0}
+    if log.is_file():
+        log_info["size"] = log.stat().st_size
+        with log.open(encoding="utf-8") as f:
+            log_info["lines"] = sum(1 for _ in f)
+    return {"sessions": sorted(sessions, key=lambda x: x["created"], reverse=True),
+            "captions_log": log_info,
+            "total_size": sum(s["size"] for s in sessions) + log_info["size"]}
+
+
+@app.get("/api/storage")
+def storage_info():
+    return _storage_snapshot()
+
+
+@app.delete("/api/sessions/{sid}")
+def delete_session(sid: str):
+    path = _session_path(sid)
+    if ACTIVE_SESSION["id"] == sid:
+        ACTIVE_SESSION["id"] = None
+    path.unlink()
+    return {"deleted": sid}
+
+
+@app.delete("/api/captions-log")
+def clear_captions_log():
+    log = DATA_DIR / "captions-log.jsonl"
+    if log.is_file():
+        log.unlink()
+    return {"cleared": True}
+
+
 @app.get("/api/self-check")
 async def self_check():
     checks = {"service": "ok", "ollama": "down", "model": "unknown", "data_dir": DATA_DIR.is_dir()}
