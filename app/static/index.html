@@ -52,10 +52,21 @@
 </div>
 
 <div class="section">
-  <div class="step">③ Windows 实时字幕（唯一的文字来源，无麦克风收听）</div>
+  <div class="step">③ 文字来源：英语用 Windows 实时字幕；芬兰语用浏览器语音识别（实时字幕不支持芬兰语）</div>
   <div class="row">
     <button id="captionBtn" class="ghost">打开实时字幕 (Win+Ctrl+L)</button>
-    <span style="color:var(--dim);font-size:13px">保持字幕窗口可见，然后双击项目目录里的 <b>start-captions.bat</b> 启动字幕桥；字幕会自动出现在下方。</span>
+    <span style="color:var(--dim);font-size:13px">英语讲座：保持字幕窗口可见，双击 <b>start-captions.bat</b> 启动字幕桥。</span>
+  </div>
+  <div class="row" style="margin-top:10px">
+    <select id="speechLang" title="浏览器语音识别语言">
+      <option value="fi-FI">语音识别：芬兰语</option>
+      <option value="en-US">语音识别：英语</option>
+      <option value="sv-SE">语音识别：瑞典语</option>
+      <option value="zh-CN">语音识别：中文</option>
+    </select>
+    <button id="speechBtn">🎤 浏览器语音识别（芬兰语等）</button>
+    <button id="speechStop" class="ghost" disabled>■ 停止识别</button>
+    <span style="color:var(--dim);font-size:13px">需要允许麦克风；识别结果与字幕桥一样自动翻译并保存。</span>
   </div>
 </div>
 
@@ -198,7 +209,53 @@ $("saveAi").onclick = async () => {
 
 $("newSession").onclick = createSession; $("askBtn").onclick = askAI; $("exportBtn").onclick = exportMarkdown;
 $("termsBtn").onclick = extractTerms; $("organizeBtn").onclick = organize;
-$("captionBtn").onclick = () => { window.open("ms-settings:easeofaccess-captions", "_blank"); };
+$( "captionBtn").onclick = () => { window.open("ms-settings:easeofaccess-captions", "_blank"); };
+
+// Browser speech recognition (Web Speech API) for languages Windows Live
+// Captions does not support — Finnish above all. Final results are posted
+// to the same /api/captions pipeline the bridge uses.
+let recog = null, recogOn = false, recogOffset0 = 0, recogTail = "", recogFlushTimer = null;
+function stopSpeech() {
+  recogOn = false;
+  if (recog) { try { recog.stop(); } catch {} }
+  clearTimeout(recogFlushTimer);
+  if (recogTail.trim()) { submitSpeechChunk(recogTail); recogTail = ""; }
+  $("speechBtn").disabled = false; $("speechStop").disabled = true;
+  setStatus("speech recognition stopped");
+}
+function submitSpeechChunk(text) {
+  const offset = (performance.now() - recogOffset0) / 1000;
+  fetch("/api/captions", {method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({text: text.trim(), offset: Math.round(offset * 100) / 100})}).catch(()=>{});
+}
+$("speechBtn").onclick = () => {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) return setStatus("此浏览器不支持语音识别，请用 Chrome 或 Edge");
+  recog = new SR();
+  recog.lang = $("speechLang").value;
+  recog.continuous = true;
+  recog.interimResults = true;
+  recogOn = true; recogOffset0 = performance.now(); recogTail = "";
+  recog.onstart = () => { $("speechBtn").disabled = true; $("speechStop").disabled = false; setStatus("listening (browser speech: " + recog.lang + ")"); };
+  recog.onresult = (ev) => {
+    let interim = "";
+    for (let i = ev.resultIndex; i < ev.results.length; i++) {
+      const t = ev.results[i][0].transcript;
+      if (ev.results[i].isFinal) recogTail += " " + t;
+      else interim += t;
+    }
+    setStatus("listening...", (recogTail + " " + interim).slice(-50));
+    // commit accumulated finals as one chunk after a short pause
+    clearTimeout(recogFlushTimer);
+    recogFlushTimer = setTimeout(() => {
+      if (recogTail.trim()) { submitSpeechChunk(recogTail); recogTail = ""; }
+    }, 1200);
+  };
+  recog.onerror = (ev) => { if (ev.error !== "no-speech" && ev.error !== "aborted") setStatus("speech error: " + ev.error); };
+  recog.onend = () => { if (recogOn) { try { recog.start(); } catch {} } };  // Chrome stops after silence: restart
+  try { recog.start(); } catch (e) { setStatus("speech start failed: " + e.message); }
+};
+$("speechStop").onclick = stopSpeech;
 $("checkBtn").onclick = async () => { setStatus("checking..."); try { const r=await fetch("/api/self-check"); const h=await r.json(); setStatus(h.ready ? "ready" : "check failed", `ollama=${h.ollama} model=${h.model}`); } catch(e) { setStatus("backend unreachable"); } };
 loadConfig();
 fetch("/api/self-check").then(r=>r.json()).then(h=>setStatus(h.ready ? "ready" : "check failed", `ollama=${h.ollama} model=${h.model}`))
