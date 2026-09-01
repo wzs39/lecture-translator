@@ -332,8 +332,10 @@ def main():
                 now = time.monotonic()
                 # Refresh the window handle periodically: the Live Captions
                 # UIA element can go stale (window closed/reopened, display
-                # change) and then silently never delivers new text again.
-                if now - last_rediscover >= 60:
+                # change) and then silently delivers empty text — the only
+                # sign of death. Keep the refresh short so recovery from a
+                # window restart is seconds, not a minute.
+                if now - last_rediscover >= 10:
                     last_rediscover = now
                     fresh = find_captions_window()
                     if fresh is not None:
