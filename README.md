@@ -1,5 +1,7 @@
 # Lecture Translator
 
+> 📖 使用手册（中文，含快速上手与 FAQ）：[docs/USER_GUIDE.md](docs/USER_GUIDE.md)
+
 Real-time lecture translation built on **Windows 实时字幕 (Live Captions)**.
 Windows does the speech recognition; this project adds translation, course
 sessions, classroom AI tools, and a persistent transcript.
