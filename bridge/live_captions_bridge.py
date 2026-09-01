@@ -264,16 +264,62 @@ class Delivery:
             mark_confirmed(total - len(self.unsent))
 
 
-def _heartbeat(url):
-    """Best-effort liveness ping so the page can show bridge status."""
+def _host_disk_free_gb(drive):
+    """Free GB on the given Windows drive; None when unavailable."""
+    try:
+        import ctypes
+        free = ctypes.c_ulonglong(0)
+        if ctypes.windll.kernel32.GetDiskFreeSpaceExW(
+                ctypes.c_wchar_p(drive), ctypes.byref(free),
+                ctypes.c_ulonglong(0), ctypes.c_ulonglong(0)):
+            return round(free.value / (1024 ** 3), 1)
+    except Exception:
+        pass
+    return None
+
+
+BRIDGE_STATE = {"window": None, "last_error": None}  # read by the heartbeat thread
+
+
+def _heartbeat(url, drive):
+    """Liveness ping + host disk space + window/error state for the page."""
     def loop():
         while True:
             try:
-                requests.post(f"{url}/api/bridge/heartbeat", timeout=5)
+                requests.post(f"{url}/api/bridge/heartbeat",
+                              json={"disk_free_gb": _host_disk_free_gb(drive),
+                                    "window_found": BRIDGE_STATE["window"],
+                                    "error": BRIDGE_STATE["last_error"]},
+                              timeout=5)
             except Exception:
                 pass
             time.sleep(10)
     threading.Thread(target=loop, daemon=True).start()
+
+
+def _selfcheck(url, drive):
+    """Diagnose the bridge + backend + window without starting to capture."""
+    out = [f"selfcheck {time.strftime('%Y-%m-%d %H:%M:%S')}"]
+    problems = []
+    try:
+        r = requests.get(f"{url}/api/self-check", timeout=8)
+        ok = r.status_code == 200 and r.json().get("ready")
+    except Exception as e:
+        ok, e = False, e
+    out.append(f"backend: {'OK' if ok else 'FAIL ' + repr(e)}")
+    if not ok:
+        problems.append("backend")
+    free = _host_disk_free_gb(drive)
+    out.append(f"disk {drive}: {free if free is not None else 'FAIL'} GB free")
+    if free is None:
+        problems.append("disk")
+    win = find_captions_window()
+    out.append(f"caption window: {'FOUND' if win else 'not open (Win+Ctrl+L)'}")
+    log_path = Path(__file__).with_name("selfcheck.log")
+    log_path.write_text("\n".join(out) + "\n", encoding="utf-8")
+    print("\n".join(out))
+    print("RESULT: " + ("PROBLEMS: " + ", ".join(problems) if problems else "OK"))
+    return 0 if not problems else 1
 
 
 _LOCK_SOCKET = None  # module-level reference keeps the singleton bind alive
@@ -291,8 +337,8 @@ def _lock_singleton():
         s.bind(("127.0.0.1", 49190))
         s.listen(1)
     except OSError:
-        print("  another bridge instance is already running; exiting.")
-        sys.exit(0)
+        print("  another bridge instance is already running; exiting (code 3).")
+        sys.exit(3)  # distinct from crashes so wrappers know not to restart
     _LOCK_SOCKET = s
 
 
@@ -300,24 +346,32 @@ def main():
     # Live Captions translations contain Chinese; never crash on a GBK console.
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(errors="replace")
-    _lock_singleton()  # exits if another bridge is already running
     ap = argparse.ArgumentParser()
     ap.add_argument("--url", default="http://localhost:8000")
+    ap.add_argument("--disk", default="D:\\",
+                    help="drive to watch for the low-disk-space page banner")
+    ap.add_argument("--selfcheck", action="store_true",
+                    help="diagnose backend/disk/window and exit without capturing")
     args = ap.parse_args()
+    if args.selfcheck:
+        sys.exit(_selfcheck(args.url, args.disk))
+    _lock_singleton()  # exits(3) if another bridge is already running
 
     print(f"bridge: backend {args.url}; looking for the Live Captions window...")
     win = None
     while win is None:
+        BRIDGE_STATE["window"] = False
         win = find_captions_window()
         if win is None:
             print("  Live Captions not found. Press Win+Ctrl+L to open it, then leave it on screen.")
             time.sleep(3)
+    BRIDGE_STATE["window"] = True
     print(f"  found: '{win.Name}' — capturing (Ctrl+C to stop)")
 
     tracker = SentenceTracker()
     chunker = Chunker()
     delivery = Delivery(args.url)
-    _heartbeat(args.url)
+    _heartbeat(args.url, args.disk)
     pending = len(delivery.unsent)
     if pending:
         print(f"  resending {pending} cached chunk(s) from a previous run...")
@@ -363,6 +417,8 @@ def main():
                     delivery.retry(now)
             except Exception as e:
                 # stale handle: re-discover the window and keep going
+                BRIDGE_STATE["last_error"] = str(e)[:120]
+                BRIDGE_STATE["window"] = False
                 print(f"  poll error: {e}; re-discovering the caption window")
                 win = None
                 while win is None:
@@ -373,6 +429,8 @@ def main():
                     if win is None:
                         print("  Live Captions window gone; waiting for it to reopen...")
                         time.sleep(3)
+                BRIDGE_STATE["window"] = True
+                BRIDGE_STATE["last_error"] = None
                 print("  caption window reconnected")
                 prev_text = ""
     finally:

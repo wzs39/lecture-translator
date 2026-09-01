@@ -39,6 +39,7 @@
 <body>
 <h1>Lecture Translator</h1>
 <div class="sub">Windows 实时字幕（高质量识别）→ 本地 AI 翻译 → 课堂笔记。翻译与整理在 Docker 容器内，识别用 Windows 自带字幕。</div>
+<div id="diskWarn" style="display:none;background:#7f1d1d;color:#ffd7d7;padding:7px 12px;border-radius:8px;margin-bottom:10px;font-size:13px">⚠️ D 盘剩余空间不足 <b>20GB</b>（当前 <span id="diskFreeText"></span> GB）——Docker 数据盘会把 D 盘写满，请立即清理磁盘或导出课程后释放空间。</div>
 
 <div class="section">
   <div class="row">
@@ -56,6 +57,7 @@
       <div class="row">
     <span id="status">idle</span>
     <span id="bridgeLamp" style="color:var(--dim);font-size:13px">● 桥状态未知</span>
+    <span id="bridgeDetail" style="color:var(--dim);font-size:12px"></span>
     <button id="checkBtn" class="ghost">检查服务</button>
       </div>
     </div>
@@ -232,6 +234,13 @@ async function poll() {
     pollSince = j.next;
     $("bridgeLamp").textContent = j.bridge_online ? "🟢 字幕桥在线" : "🔴 字幕桥离线";
     $("bridgeLamp").style.color = j.bridge_online ? "#6fe38b" : "var(--dim)";
+    const winTxt = j.bridge_window == null ? "未知" : (j.bridge_window ? "已找到" : "等待打开(Win+Ctrl+L)");
+    $("bridgeLamp").title = `字幕窗口：${winTxt}${j.bridge_error ? " · 最近错误：" + j.bridge_error : ""}`;
+    $("bridgeDetail").textContent = j.bridge_online
+      ? `窗口 ${winTxt}${j.bridge_error ? " · ⚠️ " + j.bridge_error : ""}`
+      : "备用：可用下方 ③ 浏览器语音识别继续出字幕，或双击 start-captions.bat 重启桥";
+    if (j.disk_warn) { $("diskWarn").style.display = "block"; $("diskFreeText").textContent = j.disk_free_gb; }
+    else $("diskWarn").style.display = "none";
     if (j.lines.length) setStatus("capturing", `${original.length} 段`);
   } catch {}
 }

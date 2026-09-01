@@ -55,6 +55,10 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 CAPTIONS = []  # [{text, translation, offset, at}]
 ACTIVE_SESSION = {"id": None}
 BRIDGE_LAST_SEEN = 0.0  # monotonic timestamp of the bridge's last heartbeat
+BRIDGE_DISK_FREE = None  # host drive free GB reported by the bridge
+BRIDGE_WINDOW = None      # caption window visible to the bridge
+BRIDGE_ERROR = None       # last bridge-side error (None = healthy)
+DISK_WARN_GB = 20  # page banner when the Docker data drive drops below this
 CAPTIONS_MAX = 500  # live polling only; persisted transcripts are never pruned
 TRANSLATION_CACHE_MAX = 500
 
@@ -678,18 +682,34 @@ async def push_caption(req: CaptionReq):
     return line
 
 
+class HeartbeatReq(BaseModel):
+    disk_free_gb: float | None = None  # host drive free space, from the bridge
+    window_found: bool | None = None   # caption window visible to the bridge
+    error: str | None = None           # last bridge-side error (None = healthy)
+
+
 @app.post("/api/bridge/heartbeat")
-def bridge_heartbeat():
-    global BRIDGE_LAST_SEEN
+def bridge_heartbeat(req: HeartbeatReq = HeartbeatReq()):
+    global BRIDGE_LAST_SEEN, BRIDGE_DISK_FREE, BRIDGE_WINDOW, BRIDGE_ERROR
     BRIDGE_LAST_SEEN = time.monotonic()
+    if req.disk_free_gb is not None:
+        BRIDGE_DISK_FREE = req.disk_free_gb
+    if req.window_found is not None:
+        BRIDGE_WINDOW = req.window_found
+    BRIDGE_ERROR = req.error
     return {"ok": True}
 
 
 @app.get("/api/captions")
 def poll_captions(since: int = 0):
     since = max(0, min(since, len(CAPTIONS)))
+    fresh = (time.monotonic() - BRIDGE_LAST_SEEN) < 25
+    disk_free = BRIDGE_DISK_FREE if fresh else None  # stale bridge = unknown
     return {"lines": CAPTIONS[since:], "next": len(CAPTIONS), "active_session": ACTIVE_SESSION["id"],
-            "bridge_online": (time.monotonic() - BRIDGE_LAST_SEEN) < 25}
+            "bridge_online": fresh, "disk_free_gb": disk_free,
+            "disk_warn": disk_free is not None and disk_free < DISK_WARN_GB,
+            "bridge_window": (BRIDGE_WINDOW if fresh else None),
+            "bridge_error": (BRIDGE_ERROR if fresh else None)}
 
 
 @app.get("/api/search")

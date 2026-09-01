@@ -13,7 +13,8 @@ Coverage map (each line asserts one behavior through the real HTTP surface):
   search/stats -> keyword hit with session title; stats row exists
   errors       -> 400/404 boundaries (see table)
 """
-import json, threading, uuid, urllib.request, urllib.error, urllib.parse
+import json, os, subprocess, threading, uuid
+import urllib.request, urllib.error, urllib.parse
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 HOST = "http://localhost:8000"
@@ -54,7 +55,8 @@ page = urllib.request.urlopen(HOST + "/").read().decode()
 assert all(m in page for m in ["实时字幕", "字幕桥", "问 AI", "导出 Markdown",
                                "saveDoc", "ankiBtn", "statsBtn", "本地 Ollama",
                                "分类管理", "AI 总结", "saveSummaryBtn",
-                               "addCategoryBtn", "summaryList", "cleanTestBtn"])
+                               "addCategoryBtn", "summaryList", "cleanTestBtn",
+                               "diskWarn", "bridgeDetail"])
 
 # --- real model paths ----------------------------------------------------
 assert post("/api/translate", {"text": "Our next lecture covers chapter five."})["text"]
@@ -118,6 +120,16 @@ mock.shutdown()
 # --- heartbeat, search, stats --------------------------------------------
 post("/api/bridge/heartbeat", {})
 assert get("/api/captions?since=0")["bridge_online"] is True
+post("/api/bridge/heartbeat", {"disk_free_gb": 15.2})
+assert get("/api/captions?since=0")["disk_warn"] is True
+post("/api/bridge/heartbeat", {"disk_free_gb": 500})
+assert get("/api/captions?since=0")["disk_warn"] is False
+post("/api/bridge/heartbeat", {"disk_free_gb": 500, "window_found": False, "error": "test error"})
+pvp = get("/api/captions?since=0")
+assert pvp["bridge_window"] is False and pvp["bridge_error"] == "test error"
+post("/api/bridge/heartbeat", {"window_found": True, "error": None})
+pvp = get("/api/captions?since=0")
+assert pvp["bridge_window"] is True and pvp["bridge_error"] is None
 marker = f"quasimodo {uuid.uuid4().hex[:6]}"
 sid2 = post("/api/sessions", {"title": "Search"})["id"]
 post(f"/api/sessions/{sid2}/activate")
@@ -142,6 +154,13 @@ assert get(f"/api/sessions/{scat}")["category"] == "未分类"
 assert get(f"/api/summaries/{sumid}")["category"] == "未分类"
 expect(200, f"/api/summaries/{sumid}", "DELETE")
 expect(404, f"/api/summaries/{sumid}")
+
+# --- bridge self-check (host-side diagnostics must pass) ------------------
+venv_py = os.path.join("bridge", ".venv", "Scripts", "python.exe")
+assert os.path.isfile(venv_py), "bridge venv missing"
+rc = subprocess.run([venv_py, "bridge/live_captions_bridge.py", "--selfcheck"],
+                    capture_output=True, timeout=90)
+assert rc.returncode == 0, rc.stdout.decode("utf-8", "replace")[-500:]
 
 # --- error boundaries -----------------------------------------------------
 post("/api/config", {"ai_key": "", "ai_base": "http://127.0.0.1:9"})
