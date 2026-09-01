@@ -36,6 +36,12 @@ POLL_SEC = 0.4
 SEEN_EXACT = 400   # exact-match lookback
 SEEN_SIM = 20      # fuzzy (rewrite) lookback
 
+# Long-sentence mode: merge 2-4 committed sentences into one chunk before
+# translating, so subtitles read as continuous speech, not fragments.
+CHUNK_SENTS = 3
+CHUNK_CHARS = 280
+CHUNK_PAUSE = 6.0  # flush a partial chunk after this many seconds idle
+
 
 def find_captions_window():
     root = uia.GetRootControl()
@@ -135,6 +141,48 @@ class SentenceTracker:
         return out
 
 
+class Chunker:
+    """Merges committed sentences into larger chunks for translation."""
+
+    def __init__(self):
+        self.sents = []
+        self.offset = None
+        self.last = 0.0
+
+    def add(self, sentence, offset, now):
+        if not self.sents:
+            self.offset = offset
+        self.sents.append(sentence)
+        self.last = now
+        return self.full()
+
+    def full(self):
+        text = " ".join(self.sents)
+        return (len(self.sents) >= CHUNK_SENTS or len(text) >= CHUNK_CHARS), text, self.offset
+
+    def due(self, now):
+        return bool(self.sents) and now - self.last >= CHUNK_PAUSE
+
+    def flush(self):
+        text, off = " ".join(self.sents), self.offset
+        self.sents, self.offset = [], None
+        return text, off
+
+
+def post_chunk(url, text, offset):
+    try:
+        r = requests.post(f"{url}/api/captions",
+                          json={"text": text, "offset": offset}, timeout=90)
+        ok, line = r.ok, (r.json() if r.ok else {})
+    except Exception as e:
+        ok, line = False, {}
+        print(f"  backend unreachable: {e}")
+    shown = line.get("translation", "")
+    print(f"[{int(offset//60):02d}:{int(offset%60):02d}] {'OK' if ok else 'FAILED'} {text}")
+    if shown:
+        print(f"        -> {shown}")
+
+
 def main():
     # Live Captions translations contain Chinese; never crash on a GBK console.
     if hasattr(sys.stdout, "reconfigure"):
@@ -153,6 +201,7 @@ def main():
     print(f"  found: '{win.Name}' — capturing (Ctrl+C to stop)")
 
     tracker = SentenceTracker()
+    chunker = Chunker()
     offset0 = time.monotonic()
     prev_text = ""
     while True:
@@ -161,19 +210,15 @@ def main():
             text = caption_text(win)
             if text != prev_text:
                 prev_text = text
+                now = time.monotonic()
                 for sentence in tracker.feed(text):
-                    offset = round(time.monotonic() - offset0, 2)
-                    try:
-                        r = requests.post(f"{args.url}/api/captions",
-                                          json={"text": sentence, "offset": offset}, timeout=90)
-                        ok, line = r.ok, (r.json() if r.ok else {})
-                    except Exception as e:
-                        ok, line = False, {}
-                        print(f"  backend unreachable: {e}")
-                    shown = line.get("translation", "")
-                    print(f"[{int(offset//60):02d}:{int(offset%60):02d}] {'OK' if ok else 'FAILED'} {sentence}")
-                    if shown:
-                        print(f"        -> {shown}")
+                    ready, chunk, off = chunker.add(sentence, round(now - offset0, 2), now)
+                    if ready:
+                        ctext, coff = chunker.flush()
+                        post_chunk(args.url, ctext, coff)
+            if chunker.due(time.monotonic()):  # speaker paused: flush the tail
+                ctext, coff = chunker.flush()
+                post_chunk(args.url, ctext, coff)
         except Exception as e:
             # never let one bad poll kill the bridge
             print(f"  poll error: {e}")

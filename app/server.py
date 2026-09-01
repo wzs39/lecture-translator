@@ -9,6 +9,7 @@ runs inside containers. A small host-side bridge (bridge/live_captions_bridge.py
 reads caption text via UI Automation and posts it here.
 """
 import os
+import re
 import time
 import logging
 import json
@@ -199,7 +200,42 @@ async def organize(req: OrganizeReq):
 
 
 
-async def translate_text(text: str, target: str, context: str = "") -> str:
+# Cloud translation (fast, natural long-sentence output) with local Qwen
+# as the offline fallback. Google's free endpoint is tried first but is
+# rate-limited (429) from some networks; MyMemory handles auto language
+# detection (Finnish/English/Chinese) and works where Google is blocked.
+CLOUD_TARGET = {"Chinese (Simplified)": "zh-CN", "English": "en", "Spanish": "es"}
+
+
+async def google_translate(text: str, to: str) -> str:
+    async with httpx.AsyncClient(timeout=8) as cx:
+        r = await cx.get("https://translate.googleapis.com/translate_a/single",
+                         params={"client": "gtx", "sl": "auto", "tl": to, "dt": "t", "q": text})
+        r.raise_for_status()
+        return "".join(part[0] for part in r.json()[0] if part and part[0]).strip()
+
+
+async def mymemory_translate(text: str, to: str) -> str:
+    async with httpx.AsyncClient(timeout=10) as cx:
+        r = await cx.get("https://api.mymemory.translated.net/get",
+                         params={"q": text[:480], "langpair": f"Autodetect|{to}"})
+        r.raise_for_status()
+        out = r.json().get("responseData", {}).get("translatedText", "")
+        if "MYMEMORY WARNING" in out:  # quota notice leaks into the field
+            raise RuntimeError(out[:80])
+        return out.strip()
+
+
+async def translate_text(text: str, target: str, context: str = "") -> tuple[str, str]:
+    """Returns (translation, backend_used)."""
+    to = CLOUD_TARGET.get(target, "zh-CN")
+    for cloud in (google_translate, mymemory_translate):
+        try:
+            out = await cloud(text, to)
+            if out:
+                return out, cloud.__name__
+        except Exception as e:
+            log.warning("%s failed, trying next backend: %s", cloud.__name__, e)
     prompt = (
         "You are a professional live subtitle translator for university lectures. "
         f"Translate into {target}.\n"
@@ -228,7 +264,7 @@ async def translate_text(text: str, target: str, context: str = "") -> str:
             r.raise_for_status()
             # qwen3 may leak chain-of-thought before the answer; take
             # everything after an explicit reasoning block if present.
-            return r.json().get("response", "").split("</think>")[-1].strip()
+            return r.json().get("response", "").split("</think>")[-1].strip(), "ollama"
     except Exception as e:
         log.exception("ollama failed")
         raise HTTPException(502, f"translation backend: {e}")
@@ -236,10 +272,10 @@ async def translate_text(text: str, target: str, context: str = "") -> str:
 
 @app.post("/api/translate")
 async def translate(req: TranslateReq):
-    """Translate one sentence with context via local Ollama."""
+    """Translate one sentence with context."""
     t0 = time.time()
-    text = await translate_text(req.text, req.target, req.context)
-    out = {"text": text, "model": CONFIG["model"], "seconds": round(time.time() - t0, 2)}
+    text, backend = await translate_text(req.text, req.target, req.context)
+    out = {"text": text, "model": backend, "seconds": round(time.time() - t0, 2)}
     log.info("translate: %s", out)
     return out
 
@@ -262,7 +298,8 @@ async def push_caption(req: CaptionReq):
     norm = "".join(ch for ch in req.text.lower() if ch.isalnum())
     if any(norm == "".join(ch for ch in l["text"].lower() if ch.isalnum()) for l in CAPTIONS[-30:]):
         return {"duplicate": True}
-    translation = await translate_text(req.text.strip(), "Chinese (Simplified)")
+    translation, backend = await translate_text(req.text.strip(), "Chinese (Simplified)")
+    log.info("caption via %s", backend)
     line = {
         "text": req.text.strip(),
         "translation": translation,
