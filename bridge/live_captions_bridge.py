@@ -32,7 +32,7 @@ import uiautomation as uia
 WINDOW_CLASS = "LiveCaptionsDesktopWindow"
 SENTENCE_RE = re.compile(r"[^.!?。！？]+[.!?。！？]+")
 PRIVATE_USE_RE = re.compile(r"[\ue000-\uf8ff]")
-POLL_SEC = 0.4
+POLL_SEC = 0.2  # fast speech can scroll lines out between polls; stay quick
 
 # The caption window holds ~15-20 lines and recognition rewrites older ones;
 # the seen-set must cover all of them or old sentences get re-posted forever.
@@ -277,27 +277,34 @@ def main():
         print(f"  resending {pending} cached chunk(s) from a previous run...")
     offset0 = time.monotonic()
     prev_text = ""
-    while True:
-        time.sleep(POLL_SEC)
-        try:
-            now = time.monotonic()
-            text = caption_text(win)
-            if text != prev_text:
-                prev_text = text
-                for sentence in tracker.feed(text):
-                    ready, chunk, off = chunker.add(sentence, round(now - offset0, 2), now)
-                    if ready:
-                        ctext, coff = chunker.flush()
-                        delivery.submit(ctext, coff)
-            if chunker.due(now):  # speaker paused: flush the tail
-                ctext, coff = chunker.flush()
-                delivery.submit(ctext, coff)
-            if delivery.retry_due(now):
-                delivery.retry(now)
-        except Exception as e:
-            # never let one bad poll kill the bridge
-            print(f"  poll error: {e}")
-            time.sleep(1)
+    try:
+        while True:
+            time.sleep(POLL_SEC)
+            try:
+                now = time.monotonic()
+                text = caption_text(win)
+                if text != prev_text:
+                    prev_text = text
+                    for sentence in tracker.feed(text):
+                        ready, chunk, off = chunker.add(sentence, round(now - offset0, 2), now)
+                        if ready:
+                            ctext, coff = chunker.flush()
+                            delivery.submit(ctext, coff)
+                if chunker.due(now):  # speaker paused: flush the tail
+                    ctext, coff = chunker.flush()
+                    delivery.submit(ctext, coff)
+                if delivery.retry_due(now):
+                    delivery.retry(now)
+            except Exception as e:
+                # never let one bad poll kill the bridge
+                print(f"  poll error: {e}")
+                time.sleep(1)
+    finally:
+        # Ctrl+C / window vanished: flush the half-built chunk so nothing is lost
+        if chunker.sents:
+            ctext, coff = chunker.flush()
+            delivery.submit(ctext, coff)
+        print("  stopped; journal kept at", JOURNAL_PATH.name)
 
 
 if __name__ == "__main__":

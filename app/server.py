@@ -262,7 +262,28 @@ async def mymemory_translate(text: str, to: str) -> str:
 
 
 async def translate_text(text: str, target: str, context: str = "") -> tuple[str, str]:
-    """Returns (translation, backend_used)."""
+    """Returns (translation, backend_used).
+
+    Quality order: cloud AI interpreter-style translation (natural spoken
+    output, context-aware) when an AI key is configured, then raw machine
+    translation (Google, MyMemory), then local Qwen."""
+    if CONFIG["ai_key"]:
+        try:
+            prompt = (
+                "You are a professional live interpreter for university lectures. "
+                f"Translate the current chunk into {target}.\n"
+                + (f"Previous chunk for context:\n{context}\n" if context else "")
+                + f"Current chunk:\n{text}\n"
+                "Rules: sound like a natural spoken lecture interpreter, never "
+                "word-for-word; keep technical terms accurate and may keep the "
+                "original term in parentheses on first mention; preserve names, "
+                "numbers and formulas; omit nothing; output ONLY the translation."
+            )
+            out, backend = await ai_complete(prompt)
+            if out:
+                return out, backend
+        except Exception as e:
+            log.warning("AI translation failed, trying machine translation: %s", e)
     to = CLOUD_TARGET.get(target, "zh-CN")
     for cloud in (google_translate, mymemory_translate):
         try:
@@ -333,7 +354,8 @@ async def push_caption(req: CaptionReq):
     norm = "".join(ch for ch in req.text.lower() if ch.isalnum())
     if any(norm == "".join(ch for ch in l["text"].lower() if ch.isalnum()) for l in CAPTIONS[-30:]):
         return {"duplicate": True}
-    translation, backend = await translate_text(req.text.strip(), "Chinese (Simplified)")
+    context = CAPTIONS[-1]["text"] if CAPTIONS else ""  # previous chunk keeps the interpreter coherent
+    translation, backend = await translate_text(req.text.strip(), "Chinese (Simplified)", context)
     log.info("caption via %s", backend)
     line = {
         "text": req.text.strip(),
