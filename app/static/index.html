@@ -125,14 +125,15 @@
 </div>
 
 <div class="section">
-  <div class="step">⑤ AI 服务设置（默认本地 Ollama，无需改动即可使用）</div>
+  <div class="step">⑤ AI 服务设置</div>
   <div class="row">
-    <input id="apiUrl" placeholder="Ollama 地址，如 http://ollama:11434">
-    <input id="apiModel" placeholder="本地模型名，如 qwen3:4b-instruct" style="min-width:200px">
-    <button id="saveConfig" class="ghost">保存配置</button>
+    <strong style="color:var(--fg)">本地 Ollama（默认优先/离线可用）</strong>
+    <input id="apiUrl" aria-label="本地 Ollama 地址" placeholder="本地地址，如 http://ollama:11434">
+    <input id="apiModel" aria-label="本地 Ollama 模型" placeholder="本地模型，如 qwen3:4b-instruct" style="min-width:200px">
+    <button id="saveConfig" class="ghost">保存本地配置</button>
   </div>
   <div class="row" style="margin-top:10px">
-    <span style="color:var(--dim);font-size:13px">云端 AI（可选，免费 Key 即可用：智谱 GLM-4-Flash / Groq / OpenRouter / DeepSeek）：</span>
+    <span style="color:var(--dim);font-size:13px"><strong>云端 AI（可选）</strong>：留空 API Key 即只使用上面的本地 Ollama；云端失败也会回退本地。</span>
   </div>
   <div class="row" style="margin-top:6px">
     <input id="aiBase" placeholder="接口地址，如 https://api.deepseek.com 或 https://open.bigmodel.cn/api/paas/v4" style="min-width:330px">
@@ -298,11 +299,11 @@ async function loadConfig() {
   } catch {}
 }
 $("saveConfig").onclick = async () => {
-  setStatus("saving config...");
+  setStatus("保存本地配置...");
   const r = await fetch("/api/config", {method:"POST", headers:{"Content-Type":"application/json"},
     body:JSON.stringify({url:$("apiUrl").value, model:$("apiModel").value})});
   if (!r.ok) return setStatus("config failed");
-  const j = await r.json(); setStatus("config saved", j.model);
+  const j = await r.json(); setStatus("本地配置已保存", j.model);
 };$( "detectBtn").onclick = async () => {
   setStatus("检测模型中...");
   const save = await fetch("/api/config", {method:"POST", headers:{"Content-Type":"application/json"},

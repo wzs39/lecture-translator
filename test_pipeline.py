@@ -16,6 +16,9 @@ assert all(marker in page for marker in
            ["实时字幕", "字幕桥", "问 AI", "AI整理（保留原文）", "导出 Markdown", "saveDoc", "ankiBtn", "statsBtn"])
 assert post_json("/api/translate", {"text": "Our next lecture covers chapter five."})["text"]
 assert isinstance(post_json("/api/terms", {"text": "Photosynthesis converts light energy."})["terms"], list)
+config = get_json("/api/config")
+assert config["url"] == "http://ollama:11434" and config["model"] == "qwen3:4b-instruct"
+assert "本地 Ollama" in page and "云端 AI（可选）" in page
 
 # captions pipeline: push a sentence like the bridge does, poll it back, and
 # confirm it lands in the active session's persisted transcript.
