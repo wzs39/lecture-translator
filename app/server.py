@@ -309,5 +309,6 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 
 @app.get("/")
 async def index():
-    return FileResponse("static/index.html")
+    # no-cache so UI updates show up without a hard refresh
+    return FileResponse("static/index.html", headers={"Cache-Control": "no-cache"})
 
