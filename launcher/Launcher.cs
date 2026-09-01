@@ -25,6 +25,69 @@ namespace LectureTranslator {
       get { return Path.GetDirectoryName(Application.ExecutablePath); }
     }
 
+    // ---- update check ----
+
+    private const string VersionUrl =
+      "https://raw.githubusercontent.com/wzs39/lecture-translator/master/version.txt";
+    private const string RepoUrl = "https://github.com/wzs39/lecture-translator";
+
+    private static string LocalVersion() {
+      try {
+        string p = Path.Combine(AppDir, "version.txt");
+        return File.Exists(p) ? File.ReadAllText(p).Trim() : "0.0.0";
+      } catch {
+        return "0.0.0";
+      }
+    }
+
+    private static string FetchRemoteVersion() {
+      try {
+        HttpWebRequest req = (HttpWebRequest)WebRequest.Create(VersionUrl);
+        req.Timeout = 6000;
+        req.UserAgent = "LectureTranslatorLauncher/1.0";
+        using (HttpWebResponse resp = (HttpWebResponse)req.GetResponse())
+        using (StreamReader r = new StreamReader(resp.GetResponseStream())) {
+          return r.ReadToEnd().Trim();
+        }
+      } catch {
+        return null; // offline / GitHub unreachable: skip silently
+      }
+    }
+
+    private static int[] ParseVersion(string v) {
+      int[] r = new int[] { 0, 0, 0 };
+      string[] parts = (v ?? "").Split('.');
+      for (int i = 0; i < parts.Length && i < 3; i++) {
+        int n;
+        if (int.TryParse(parts[i], out n) && n >= 0) r[i] = n;
+      }
+      return r;
+    }
+
+    private static int CompareVersions(string a, string b) {
+      int[] pa = ParseVersion(a), pb = ParseVersion(b);
+      for (int i = 0; i < 3; i++) {
+        if (pa[i] != pb[i]) return pa[i] < pb[i] ? -1 : 1;
+      }
+      return 0;
+    }
+
+    private void CheckForUpdate() {
+      string remote = FetchRemoteVersion();
+      if (string.IsNullOrEmpty(remote)) return;
+      if (CompareVersions(remote, LocalVersion()) <= 0) return;
+      if (!IsHandleCreated || IsDisposed) return;
+      BeginInvoke(new Action(delegate {
+        DialogResult r = MessageBox.Show(
+          "发现新版本 " + remote + "（当前 " + LocalVersion() + "）。\r\n\r\n" +
+          "请到 GitHub 下载最新代码，然后重新双击 install.bat 即可更新。\r\n\r\n" +
+          "现在打开 GitHub 页面？",
+          "Lecture Translator 有更新", MessageBoxButtons.YesNo,
+          MessageBoxIcon.Information);
+        if (r == DialogResult.Yes) OpenBrowser();
+      }));
+    }
+
     public App() {
       Text = "Lecture Translator 启动器";
       ClientSize = new Size(380, 150);
@@ -50,6 +113,8 @@ namespace LectureTranslator {
       Controls.Add(_status);
       Controls.Add(_startBtn);
       Controls.Add(_stopBtn);
+
+      Load += delegate { ThreadPool.QueueUserWorkItem(delegate { CheckForUpdate(); }); };
     }
 
     private void SetStatus(string text) {
