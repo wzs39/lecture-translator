@@ -112,7 +112,10 @@
       </select>
       <button id="speechBtn">🎤 浏览器语音识别（芬兰语等）</button>
       <button id="speechStop" class="ghost" disabled>■ 停止识别</button>
-      <span style="color:var(--dim);font-size:13px">需要允许麦克风；识别结果与字幕桥一样自动翻译并保存。</span>
+      <button id="verifyBtn" class="ghost">🔍 校验专有名词</button>
+      <button id="verifyStop" class="ghost" disabled>■ 停止校验</button>
+      <span style="color:var(--dim);font-size:13px">麦克风补充输入：Windows 字幕漏掉的专有名词（人名/术语）会列出，可一键加入术语表，让翻译始终正确。</span>
+      <div id="verifyBox" style="margin-top:8px;font-size:13px;color:var(--dim)"></div>
     </div>
   </div>
 </div>
@@ -779,8 +782,56 @@ $("speechBtn").onclick = () => {
   recog.onerror = (ev) => { if (ev.error !== "no-speech" && ev.error !== "aborted") setStatus("speech error: " + ev.error); };
   recog.onend = () => { if (recogOn) { try { recog.start(); } catch {} } };  // Chrome stops after silence: restart
   try { recog.start(); } catch (e) { setStatus("speech start failed: " + e.message); }
+};$("speechStop").onclick = stopSpeech;
+
+// ---- proper-noun verifier: open the mic as a SECOND input, cross-check the mic
+// transcript against the caption stream, and surface proper nouns Windows Live
+// Captions mangled/dropped. One-tap add feeds them to the course glossary so
+// future translations render these terms identically.
+let vRecog = null, vOn = false, vInterim = "";
+function renderVerify(candidates, statusText) {
+  const box = $("verifyBox");
+  if (statusText) box.innerHTML = statusText;
+  if (!candidates || !candidates.length) return;
+  box.innerHTML += "<br><span style='color:var(--acc)'>可能是字幕没识别的专有名词：</span>" + candidates.map(c =>
+    `<button class="ghost" data-vterm="${escapeHtml(c)}" style="padding:2px 8px;font-size:12px;margin:2px">＋ ${escapeHtml(c)}</button>`
+  ).join("");
+  box.querySelectorAll("[data-vterm]").forEach(b => b.onclick = () => {
+    if (!sessionId) return setStatus("请先新建课程，再把术语加入术语表");
+    $("gTerm").value = b.dataset.vterm;
+    $("gZh").value = b.dataset.vterm;  // default zh = the term itself; user can refine
+    loadGlossary().then(() => { setStatus("术语已填入下方术语表", "点「添加」确认"); });
+  });
+}
+function submitVerify(text) {
+  fetch("/api/verify", {method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({text: text.trim(), baseline: original.join(" ")})})
+    .then(r => r.json()).then(j => {
+      if (j.candidates && j.candidates.length) renderVerify(j.candidates);
+      else renderVerify(null, "✓ 本次未发现字幕漏掉的词");
+    }).catch(() => {});
+}
+$("verifyBtn").onclick = () => {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) return setStatus("此浏览器不支持语音识别，请用 Chrome 或 Edge");
+  vRecog = new SR();
+  vRecog.lang = "en-US";
+  vRecog.continuous = true;
+  vRecog.interimResults = false;
+  vOn = true; vInterim = "";
+  vRecog.onstart = () => { $("verifyBtn").disabled = true; $("verifyStop").disabled = false; setStatus("校验中：请说一句话，含专业术语"); };
+  vRecog.onresult = (ev) => {
+    for (let i = ev.resultIndex; i < ev.results.length; i++) {
+      if (ev.results[i].isFinal) { submitVerify(ev.results[i][0].transcript); }
+    }
+  };
+  vRecog.onerror = (ev) => { if (ev.error !== "no-speech" && ev.error !== "aborted") setStatus("verify error: " + ev.error); };
+  vRecog.onend = () => { if (vOn) { try { vRecog.start(); } catch {} } };
+  try { vRecog.start(); } catch (e) { setStatus("verify start failed: " + e.message); }
 };
-$("speechStop").onclick = stopSpeech;
+$("verifyStop").onclick = () => { vOn = false; if (vRecog) { try { vRecog.stop(); } catch {} } $("verifyBtn").disabled = false; $("verifyStop").disabled = true; setStatus("校验已停止"); };
+
+
 $("checkBtn").onclick = async () => { setStatus("checking..."); try { const r=await fetch("/api/self-check"); const h=await r.json(); setStatus(h.ready ? "ready" : "check failed", `ollama=${h.ollama} model=${h.model}`); } catch(e) { setStatus("backend unreachable"); } };
 loadConfig();
 loadStorage();

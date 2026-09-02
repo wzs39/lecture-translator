@@ -763,6 +763,50 @@ async def push_caption(req: CaptionReq):
     return line
 
 
+class VerifyReq(BaseModel):
+    text: str  # one finalized mic chunk (what the user actually heard)
+    baseline: str = ""  # optional caption text to compare against; defaults to recent CAPTIONS
+
+
+EN_STOP = {"the","and","that","this","with","from","have","you","your","they","them","their",
+           "will","would","could","should","about","there","which","what","when","where","who",
+           "how","not","but","for","are","was","were","been","being","than","then","also",
+           "has","had","into","over","very","just","such","some","these","those","because",
+           "before","after","during","while","each","other","more","most","much","many","can",
+           "may","might","must","should","does","did","done","now","so","if","of","in","on",
+           "at","to","by","it","is","be","or","as","an","a","and","one","two","three","first",
+           "second","like","well","really","actually","thing","things","think","know","get","got",
+           "make","made","way","part","point","right","going","go","come","see","look","say","said"}
+
+
+@app.post("/api/verify")
+def verify_proper_nouns(req: VerifyReq):
+    """Cross-check a mic transcript against the caption stream to catch proper
+    nouns / technical terms Windows Live Captions mangled or dropped.
+
+    `text` is a finalized chunk from the mic; `baseline` (or recent CAPTIONS)
+    is what the captioner wrote. Candidate terms are words in the mic transcript
+    that are absent from the baseline — i.e. the captioner likely transcribed
+    them differently or missed them entirely."""
+    mic = req.text.strip()
+    if not mic:
+        raise HTTPException(400, "text is required")
+    baseline = (req.baseline or " ".join(c["text"] for c in CAPTIONS[-30:])).lower()
+    toks = re.findall(r"[A-Za-z][A-Za-z'\-]{1,}\b", mic)
+    candidates, seen = [], set()
+    for t in toks:
+        key = t.strip("'\"-.").lower()
+        if not key or key in EN_STOP or key.isdigit():  # noqa: E721
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        # absent from the caption text within word boundaries => likely missed/mangled
+        if not re.search(r"\b" + re.escape(key) + r"\b", baseline):
+            candidates.append(t.strip("'\"-."))
+    return {"candidates": candidates[:30], "baseline_words": len(baseline.split())}
+
+
 class HeartbeatReq(BaseModel):
     disk_free_gb: float | None = None  # host drive free space, from the bridge
     window_found: bool | None = None   # caption window visible to the bridge

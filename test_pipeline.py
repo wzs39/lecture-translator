@@ -58,7 +58,7 @@ assert all(m in page for m in ["实时字幕", "字幕桥", "问 AI", "导出 Ma
                                "addCategoryBtn", "summaryList", "cleanTestBtn",
                                "diskWarn", "bridgeDetail", "reviewBtn", "quizBtn", "quizBox",
                                "loadHistoryBtn", "settingsModal", "cloudTranslate",
-                               "translateBackendHint"])
+                               "translateBackendHint", "verifyBtn"])
 
 # --- real model paths ----------------------------------------------------
 assert post("/api/translate", {"text": "Our next lecture covers chapter five."})["text"]
@@ -137,6 +137,18 @@ expect(400, "/api/quiz", "POST", {"category": "EmptyQuizCat"})
 expect(200, f"/api/summaries/{qsum}", "DELETE")
 post("/api/config", old_cfg)
 mock.shutdown()
+
+# --- proper-noun verifier: mic transcript vs caption baseline ------------
+# The captioner wrote a mangled form; the mic heard the real term. /api/verify
+# must flag the term absent from the baseline and skip common words + known terms.
+v = post("/api/verify", {"text": "The student explained CRISPR and glycolysis.",
+                        "baseline": "the student explained crispr and glycolysis"})
+assert v["candidates"] == [] , "crispr/glycolysis already in baseline => no candidates"
+v = post("/api/verify", {"text": "The student explained CRISPR and glycolysis.",
+                        "baseline": "the student explained crisper and glycolysis"})
+assert "CRISPR" in v["candidates"] and "glycolysis" not in v["candidates"], v
+assert v["baseline_words"] == 6
+expect(400, "/api/verify", "POST", {"text": "   "})
 
 # --- cloud-translate toggle: persists and round-trips ---------------------
 cfg0 = get("/api/config")
