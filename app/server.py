@@ -553,14 +553,29 @@ async def ai_complete(prompt: str, json_mode: bool = False, timeout_s: int = 120
 
 @app.post("/api/ask")
 async def ask(req: AskReq):
-    if not req.question.strip() or not req.context.strip():
-        raise HTTPException(400, "question and context are required")
+    if not req.question.strip():
+        raise HTTPException(400, "question is required")
     context = req.context.strip()
+    # no caption transcript supplied? fall back to the active course's materials
+    # so the AI can still answer from the uploaded slides/notes.
+    if not context:
+        sid = ACTIVE_SESSION["id"]
+        if sid:
+            mats = [m.get("text", "") for m in _load_materials(sid) if m.get("text")]
+            context = "\n\n".join(mats[:3])[:ASK_CONTEXT_CHARS]
+    if not context:
+        raise HTTPException(400, "question and context are required")
     if len(context) > ASK_CONTEXT_CHARS:  # recent window, not the whole lecture
         context = "[...较早内容省略...]" + context[-ASK_CONTEXT_CHARS:]
-    prompt = ("只根据下面的课堂原文回答问题。无法从原文确定时明确说不知道，禁止编造。"
-              f"用{req.target}回答，并引用相关原文。\n问题：{req.question}\n课堂原文：{context}"
-              + _glossary_block() + _materials_block())
+    prompt = (
+        "You are a tutor helping a student review this lecture. Answer the question using "
+        f"the lecture content below as the PRIMARY source — quote or paraphrase it. Where the "
+        f"lecture does not cover it, add an accurate, brief general-knowledge explanation and "
+        f"clearly mark it as '(not covered in the lecture)'. Never invent facts, never say 'the "
+        f"lecture says X' unless the lecture actually says X. Be helpful and concrete; use the "
+        f"glossary and course materials if relevant.\n"
+        f"Answer in {req.target}.\nQuestion: {req.question}\n\nLecture content:\n{context}"
+        + _glossary_block() + _materials_block())
     try:
         text, backend = await ai_complete(prompt)
         return {"text": text, "model": backend}

@@ -358,9 +358,19 @@ async function createSession() {
 }
 
 async function askAI() {
-  if (!$("question").value.trim() || !original.length) return setStatus("需要问题和课堂原文");
+  if (!$("question").value.trim()) return setStatus("请输入问题");
+  let ctx = original.join(" ");
+  // no captions captured yet? fall back to the course materials so the AI can
+  // still answer from the uploaded slides/notes
+  if (!ctx.trim() && sessionId) {
+    try {
+      const d = await (await fetch(`/api/sessions/${sessionId}/materials?text=1`)).json();
+      ctx = (d.materials || []).map(m => `## ${m.name}\n${m.text}`).join("\n");
+    } catch {}
+  }
+  if (!ctx.trim()) return setStatus("还没有可回答的内容：先听字幕或上传讲义");
   setStatus("asking AI...");
-  const r = await fetch("/api/ask", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({question:$("question").value, context:original.join(" "), target:"Chinese (Simplified)"})});
+  const r = await fetch("/api/ask", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({question:$("question").value, context:ctx, target:"Chinese (Simplified)"})});
   const j = await r.json(); if (r.ok) addAiCard("AI回答", j.text); else setStatus("ask failed");
 }
 
