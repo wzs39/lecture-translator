@@ -193,13 +193,12 @@ expect(200, f"/api/sessions/{msid}/materials?name=ch2.txt", "DELETE")
 assert all(m["name"] != "ch2.txt" for m in get(f"/api/sessions/{msid}/materials")["materials"])
 expect(200, f"/api/sessions/{msid}", "DELETE")
 
-# --- cloud-translate toggle: persists and round-trips ---------------------
+# --- config: round-trips a harmless field (the old cloud_translate
+# toggle was removed; backend choice is now key-presence only) --------------
 cfg0 = get("/api/config")
-assert post("/api/config", {"cloud_translate": True})["cloud_translate"] is True
-assert get("/api/config")["cloud_translate"] is True
-assert post("/api/config", {"cloud_translate": False})["cloud_translate"] is False
-assert get("/api/config")["cloud_translate"] is False
-post("/api/config", {"cloud_translate": cfg0["cloud_translate"]})  # restore
+assert "ai_base" in cfg0 and "ai_key" in cfg0
+post("/api/config", {"ai_base": cfg0["ai_base"]})
+assert get("/api/config")["ai_base"] == cfg0["ai_base"]
 
 # --- heartbeat, search, stats --------------------------------------------
 post("/api/bridge/heartbeat", {})

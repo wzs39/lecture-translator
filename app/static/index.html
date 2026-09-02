@@ -45,7 +45,9 @@
   <button id="settingsBtn" class="ghost" style="font-size:13px;padding:6px 14px;vertical-align:middle">⚙ 设置</button>
 </h1>
 <div class="sub">识别 → AI 翻译 → 课程笔记 · 支持英语 / 芬兰语 / 中文 · 全部本地 Docker 运行</div>
-<div id="diskWarn" style="display:none;background:#7f1d1d;color:#ffd7d7;padding:7px 12px;border-radius:8px;margin-bottom:10px;font-size:13px">⚠️ D 盘剩余空间不足 <b>20GB</b>（当前 <span id="diskFreeText"></span> GB）——Docker 数据盘会把 D 盘写满，请立即清理磁盘或导出课程后释放空间。</div>
+<div id="diskWarn" style="display:none;background:#7f1d1d;color:#ffd7d7;padding:7px 12px;border-radius:8px;margin-bottom:10px;font-size:13px">⚠️ D 盘剩余空间不足 <b>20GB</b>（当前 <span id="diskFreeText"></span> GB）——Docker 数据盘会把 D 盘写满。
+  <button id="diskWarnClean" class="ghost" style="margin-left:8px;padding:4px 12px;font-size:12px;background:#a52a2a;color:#fff">🧹 一键清理（清字幕日志 + 测试课程）</button>
+  <span id="diskWarnResult" style="font-size:12px;margin-left:6px"></span></div>
 
 <!-- settings dialog: keeps the main page clean; opened via ⚙ 设置 -->
 <div id="settingsModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:50" onclick="if(event.target===this)this.style.display='none'">
@@ -822,6 +824,14 @@ $("cleanTestBtn").onclick = async () => {
   if (sessionId && j.deleted.includes(sessionId)) { sessionId = null; $("sessionLabel").textContent = "未创建"; }
   loadStorage();
   setStatus("test data cleaned", `${j.deleted_count} 门课程 · 日志 ${j.log_lines} 行`);
+};
+
+$("diskWarnClean").onclick = async () => {
+  if (!confirm("一键清理：删除所有测试课程并清空字幕日志？不影响真实课程。")) return;
+  const j = await (await fetch("/api/test-cleanup", {method:"POST"})).json();
+  if (sessionId && j.deleted.includes(sessionId)) { sessionId = null; $("sessionLabel").textContent = "未创建"; }
+  $("diskWarnResult").textContent = `已删除 ${j.deleted_count} 门测试课程，日志 ${j.log_lines} 行`;
+  loadStorage();
 };
 
 $("newSession").onclick = createSession; $("askBtn").onclick = askAI; $("exportBtn").onclick = exportMarkdown;
