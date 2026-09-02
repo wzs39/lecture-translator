@@ -489,6 +489,9 @@ $("uploadMaterial").onclick = async () => {
   const f = $("materialFile").files[0];
   if (!f) return setStatus("请选一个 PDF / Word / PPT / 文本文件");
   setStatus("上传讲义中...", f.name);
+  // scanned PDFs go through cloud vision OCR (10-30s) — tell the user why it's slow
+  const ocrTimer = setTimeout(() => setStatus("AI 视觉识别中…", "扫描版 PDF 需 10-30 秒，请稍候"), 4000);
+  try {
   const buf = await f.arrayBuffer();
   const b64 = btoa(String.fromCharCode(...new Uint8Array(buf)));
   const r = await fetch(`/api/sessions/${sessionId}/materials`, {method:"POST", headers:{"Content-Type":"application/json"},
@@ -497,7 +500,9 @@ $("uploadMaterial").onclick = async () => {
   if (!r.ok) return setStatus("上传失败", j.detail || `HTTP ${r.status}`);
   $("materialFile").value = "";
   loadMaterials();
-  setStatus("讲义已上传", "AI 将据此纠错并补充翻译");
+  const via = j.materials && j.materials[0] && j.materials[0].via;
+  setStatus(via === "vision" ? "讲义已上传（AI 视觉识别）" : "讲义已上传", "AI 将据此纠错并补充翻译");
+  } finally { clearTimeout(ocrTimer); }
 };
 
 let lastOrganizeText = "";
@@ -520,7 +525,7 @@ async function exportMarkdown() {
       const s = await (await fetch(`/api/sessions/${sessionId}`)).json();
       if (s.transcript.length) transcript = s.transcript;
       const mats = await (await fetch(`/api/sessions/${sessionId}/materials`)).json();
-      for (const m of (mats.materials || [])) meta.push(`- 📄 ${m.name}（${m.chars} 字）`);
+      for (const m of (mats.materials || [])) meta.push(`- 📄 ${m.name}（${m.chars} 字${m.via === "vision" ? "，AI 识别" : ""}）`);
       if (s.glossary && Object.keys(s.glossary).length)
         meta.push(`- 📖 术语表：${Object.entries(s.glossary).map(([k,v]) => `${k}=${v}`).join("、")}`);
     } catch {}

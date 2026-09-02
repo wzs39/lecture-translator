@@ -33,6 +33,7 @@ OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://ollama:11434")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen3:4b")
 CONFIG = {"url": OLLAMA_URL, "model": OLLAMA_MODEL,
           "ai_base": "https://api.deepseek.com", "ai_key": "", "ai_model": "deepseek-chat",
+          "ai_vision_model": "",
           "cloud_translate": False, "access_token": os.environ.get("ACCESS_TOKEN", "")}
 
 
@@ -142,6 +143,7 @@ class ConfigReq(BaseModel):
     ai_base: str = ""
     ai_key: str | None = None  # None = unchanged; "" = clear
     ai_model: str = ""
+    ai_vision_model: str = ""  # optional: force a specific vision model for OCR
     cloud_translate: bool | None = None  # None = unchanged; kept for UI compatibility
     deepseek_key: str = ""  # legacy field name, merged into ai_key
     access_token: str | None = None  # None = unchanged; "" = clear
@@ -152,7 +154,7 @@ RUNTIME_CONFIG_FILE = DATA_DIR / "runtime-config.json"  # survives container res
 
 def _load_runtime_config() -> None:
     saved = _load_json(RUNTIME_CONFIG_FILE, {})
-    for k in ("url", "model", "ai_base", "ai_key", "ai_model"):
+    for k in ("url", "model", "ai_base", "ai_key", "ai_model", "ai_vision_model"):
         if isinstance(saved.get(k), str) and saved[k]:
             CONFIG[k] = saved[k]
     if isinstance(saved.get("cloud_translate"), bool):
@@ -162,14 +164,14 @@ def _load_runtime_config() -> None:
 def _save_runtime_config() -> None:
     try:
         _save_json(RUNTIME_CONFIG_FILE, {k: CONFIG[k] for k in
-                   ("url", "model", "ai_base", "ai_key", "ai_model", "cloud_translate")})
+                   ("url", "model", "ai_base", "ai_key", "ai_model", "ai_vision_model", "cloud_translate")})
     except OSError as e:
         log.warning("runtime config save failed: %s", e)
 
 
 @app.get("/api/config")
 def get_config():
-    return {k: CONFIG[k] for k in ("url", "model", "ai_base", "ai_key", "ai_model", "cloud_translate")}
+    return {k: CONFIG[k] for k in ("url", "model", "ai_base", "ai_key", "ai_model", "ai_vision_model", "cloud_translate")}
 
 
 @app.get("/api/stats")
@@ -206,6 +208,8 @@ def set_config(req: ConfigReq):
         CONFIG["ai_key"] = req.ai_key.strip()
     if req.ai_model.strip():
         CONFIG["ai_model"] = req.ai_model.strip()
+    if req.ai_vision_model is not None:  # explicit string clears it too
+        CONFIG["ai_vision_model"] = req.ai_vision_model.strip()
     if req.cloud_translate is not None:
         CONFIG["cloud_translate"] = req.cloud_translate
     if req.deepseek_key.strip():  # legacy clients
@@ -213,7 +217,7 @@ def set_config(req: ConfigReq):
     if req.access_token is not None:  # explicit empty string clears it
         CONFIG["access_token"] = req.access_token.strip()
     _save_runtime_config()
-    return {k: CONFIG[k] for k in ("url", "model", "ai_base", "ai_key", "ai_model", "cloud_translate")}
+    return {k: CONFIG[k] for k in ("url", "model", "ai_base", "ai_key", "ai_model", "ai_vision_model", "cloud_translate")}
 
 
 # ---- token economy for the cloud AI ----
@@ -459,26 +463,32 @@ class MaterialReq(BaseModel):
     content_b64: str = ""
 
 
-def _pdf_pages_to_pngs(data: bytes, max_pages: int = 12) -> list[str]:
-    """Render PDF pages to base64 PNGs (PyMuPDF) for vision-model OCR."""
+def _pdf_pages_to_pngs(data: bytes, max_pages: int = 20) -> tuple[list[str], int]:
+    """Render PDF pages to base64 PNGs (PyMuPDF) for vision-model OCR.
+    Returns ([images], total_page_count) so the caller can warn on truncation."""
     import fitz
     out = []
     with fitz.open(stream=data, filetype="pdf") as doc:
+        total = doc.page_count
         if doc.needs_pass:
-            return out  # encrypted without a password: handled by the caller
+            return [], total  # encrypted without a password: handled by the caller
         for page in doc:
             if len(out) >= max_pages:
                 break
             pix = page.get_pixmap(dpi=110)  # ~1500px wide: enough for OCR
             out.append(base64.b64encode(pix.tobytes("png")).decode())
-    return out
+    return out, total
 
 
 async def _vlm_ocr_images(images_b64: list[str], hint: str) -> str:
-    """Transcribe page images via the configured cloud vision model
-    (GLM-4.5V family). Falls back to raising so the caller can 422."""
+    """Transcribe page images via a cloud vision model. Prefers an explicitly
+    configured vision model (ai_vision_model), then GLM-4.5V (free tier), then
+    the configured chat model — so DeepSeek/OpenRouter/etc. users keep working
+    when their provider has no vision endpoint. Raises if nothing works."""
+    candidates = [m for m in (CONFIG.get("ai_vision_model"), "glm-4.5v",
+                              CONFIG["ai_model"]) if m]
     content: list[dict] = []
-    for i, img in enumerate(images_b64):
+    for img in images_b64:
         content.append({"type": "image_url",
                         "image_url": {"url": f"data:image/png;base64,{img}"}})
     content.append({"type": "text",
@@ -486,14 +496,26 @@ async def _vlm_ocr_images(images_b64: list[str], hint: str) -> str:
                             f"{hint} pages, page by page, in reading order. Keep "
                             "formulas, numbers and technical terms exactly as "
                             "written. Output only the transcription."})
+    last_err = None
     async with httpx.AsyncClient(timeout=180) as cx:
-        r = await cx.post(f"{CONFIG['ai_base']}/chat/completions",
-                          headers={"Authorization": f"Bearer {CONFIG['ai_key']}"},
-                          json={"model": "glm-4.5v",
-                                "messages": [{"role": "user", "content": content}],
-                                "max_tokens": 4096, "stream": False})
-        r.raise_for_status()
-        return r.json()["choices"][0]["message"]["content"].strip()
+        for model in candidates:
+            try:
+                r = await cx.post(f"{CONFIG['ai_base']}/chat/completions",
+                                  headers={"Authorization": f"Bearer {CONFIG['ai_key']}"},
+                                  json={"model": model,
+                                        "messages": [{"role": "user", "content": content}],
+                                        "max_tokens": 4096, "stream": False})
+                r.raise_for_status()
+                j = r.json()
+                text = j["choices"][0]["message"]["content"].strip()
+                # truncation notice: a dense deck can exceed max_tokens
+                if j["choices"][0].get("finish_reason") == "length":
+                    text += "\n[AI识别不完整：文档过长，识别被截断]"
+                return text
+            except Exception as e:
+                last_err = e
+                log.warning("vision OCR with %s failed: %s", model, e)
+    raise last_err or RuntimeError("no vision model available")
 
 
 def _extract_text(name: str, data: bytes) -> str:
@@ -568,7 +590,7 @@ async def add_material(sid: str, req: MaterialReq):
     except Exception as e:
         raise HTTPException(400, f"invalid base64: {e}")
     try:
-        text = _extract_text(req.name, data)
+        text = await asyncio.to_thread(_extract_text, req.name, data)
     except ValueError as e:
         raise HTTPException(415, str(e))
     except Exception as e:
@@ -578,10 +600,12 @@ async def add_material(sid: str, req: MaterialReq):
     # weak extraction: scanned PDF, encrypted pages, image-heavy slides -> VLM OCR
     if len(text.strip()) < 200 and data[:4] == b"%PDF" and CONFIG["ai_key"].strip():
         try:
-            pages = await asyncio.to_thread(_pdf_pages_to_pngs, data)
+            pages, total_pages = await asyncio.to_thread(_pdf_pages_to_pngs, data)
             if pages:
                 text = await _vlm_ocr_images(pages, "PDF")
                 how = "vision"
+                if total_pages > len(pages):
+                    text += f"\n[仅识别前 {len(pages)} 页，共 {total_pages} 页]"
         except Exception as e:
             log.warning("VLM OCR failed for %s: %s", req.name, e)
             if not text.strip():
@@ -605,7 +629,7 @@ def list_materials(sid: str, text: int = 0):
     mats = _load_materials(sid)
     if text:
         # full stored text, for the on-page material viewer
-        return {"materials": [{"name": m["name"], "chars": m["chars"], "text": m.get("text", "")} for m in mats]}
+        return {"materials": [{"name": m["name"], "chars": m["chars"], "via": m.get("via", "text"), "text": m.get("text", "")} for m in mats]}
     return {"materials": [{"name": m["name"], "chars": m["chars"]} for m in mats]}
 
 
