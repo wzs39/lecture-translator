@@ -326,6 +326,41 @@ def _glossary_block() -> str:
     return f"\nCourse glossary (use these EXACT renderings):\n{lines}\n"
 
 
+def _course_topic() -> str:
+    """Short subject line ('<title> · <category>') for the active course, so a
+    translator knows the lecture's domain and keeps ambiguous terms in context
+    (e.g. cell vs. phone in a biology lecture)."""
+    sid = ACTIVE_SESSION["id"]
+    if not sid:
+        return ""
+    try:
+        s = json.loads((DATA_DIR / f"session-{sid}.json").read_text(encoding="utf-8"))
+        title = (s.get("title") or "").strip()
+        cat = (s.get("category") or "").strip()
+        parts = [p for p in (title, cat) if p and p != "未分类"]
+        return " · ".join(parts) if parts else ""
+    except (OSError, json.JSONDecodeError):
+        return ""
+
+
+def _recent_caption_context(limit: int = 3) -> str:
+    """The last few caption chunks before the current one, so the translator
+    follows the thread instead of translating each sentence in isolation."""
+    return " ".join(c["text"] for c in CAPTIONS[-limit:])
+
+
+def _translation_system() -> str:
+    """Optional lead-in describing the active course, prepended to prompts so the
+    model anchors ambiguous noun references to the right subject."""
+    topic = _course_topic()
+    g = _active_glossary()
+    # Prefer a course-topic line, but always add glossary to keep terms consistent.
+    prefix = f"This lecture is about: {topic}. " if topic else "This is a university lecture. "
+    if g:
+        prefix += "Use the course glossary for these terms. "
+    return prefix
+
+
 @app.post("/api/sessions/{sid}/notes")
 def save_session_notes(sid: str, req: NotesReq):
     """Save the student's own notes; AI output never overwrites them."""
@@ -607,26 +642,53 @@ def _mark_rate_limited(name: str):
     log.warning("%s rate-limited; cooling down for %ss", name, RATE_LIMIT_COOLDOWN)
 
 
+async def _translate_with_model(text: str, target: str, context: str) -> tuple[str, str]:
+    """Context-aware translation via the configured model (cloud AI if a key is
+    set, local Ollama otherwise). Anchors on the course topic + recent chunks +
+    glossary so ambiguous terms stay in the lecture's domain. Returns (text, backend)."""
+    sys_ctx = _translation_system()
+    prompt = (
+        "You are a professional live interpreter for university lectures. "
+        + sys_ctx
+        + f"\nTranslate the current sentence into {target}.\n"
+        + (f"Recent lecture context:\n{context}\n\n" if context else "")
+        + f"Current sentence:\n{text}\n"
+        "Rules: translate the MEANING, never word-for-word; keep it sounding like a "
+        "natural spoken lecture in Chinese; preserve names, numbers, formulas, and "
+        "technical terms; resolve ambiguous words against the course topic/glossary; "
+        "do not add explanations or omit information; output ONLY the translation."
+        + _glossary_block()
+    )
+    return await ai_complete(prompt)
+
+
 async def translate_text(text: str, target: str, context: str = "") -> tuple[str, str]:
     """Returns (translation, backend_used).
 
-    Speed strategy: machine translation (usually < 1.5 s) runs first; when
-    an AI key is configured AND cloud_translate is enabled, the AI
-    interpreter version races it in a parallel task and wins if it lands
-    within AI_TRANSLATE_GRACE seconds — latency is bounded by machine
-    translation, quality by the AI. With cloud_translate off the free
-    machine translation wins outright (zero token cost). Ollama is the
-    offline last resort. Results are cached: repeated sentences (lectures
-    repeat a lot) cost zero tokens and zero latency."""
+    Quality strategy: the context-aware model (cloud AI if a key is set, else
+    local Ollama) is the default and races against free machine translation.
+    If the model lands within AI_TRANSLATE_GRACE seconds its meaning-aware
+    output wins (bounded latency); otherwise the fast machine translation is
+    used as a speed fallback so the live subtitle never stalls. Results are
+    cached against the normalized text + context."""
     context = (context or "")[-TRANSLATE_CONTEXT_CHARS:]
     key = _cache_key(text, target, context)
     hit = cache_get(key)
     if hit is not None:
         return hit[0], "cache"
     to = CLOUD_TARGET.get(target, "zh-CN")
+    # kick off the context-aware model first
+    model_task = asyncio.create_task(_translate_with_model(text, target, context))
+    model_out, model_backend = None, None
+    try:
+        model_out, model_backend = await asyncio.wait_for(model_task, timeout=AI_TRANSLATE_GRACE)
+    except (asyncio.TimeoutError, asyncio.CancelledError):
+        model_task.cancel()
+    except Exception as e:
+        log.warning("model translation failed: %s", e)
+    # machine translation as the bounded-speed fallback / first coverage
     mt_text = None
-    if not CONFIG["cloud_translate"]:
-        # Cloud AI translation disabled: free machine translation only, no token cost
+    if model_out is None:
         for name, cloud in (("google", google_translate), ("mymemory", mymemory_translate)):
             if not _cloud_available(name):
                 continue
@@ -642,72 +704,21 @@ async def translate_text(text: str, target: str, context: str = "") -> tuple[str
                     log.warning("%s failed: %s", cloud.__name__, e)
             except Exception as e:
                 log.warning("%s failed: %s", cloud.__name__, e)
-
-    if CONFIG["ai_key"] and CONFIG["cloud_translate"]:
-        prompt = (
-            "You are a professional live interpreter for university lectures. "
-            f"Translate the current chunk into {target}.\n"
-            + (f"Previous chunk for context:\n{context}\n" if context else "")
-            + f"Current chunk:\n{text}\n"
-            "Rules: sound like a natural spoken lecture interpreter, never "
-            "word-for-word; keep technical terms accurate and may keep the "
-            "original term in parentheses on first mention; preserve names, "
-            "numbers and formulas; omit nothing; output ONLY the translation."
-            + _glossary_block()
-        )
-        ai_task = asyncio.create_task(ai_complete(prompt, timeout_s=10))
-        if mt_text is None:  # nothing fast yet: give the AI a real chance
-            try:
-                out, backend = await asyncio.wait_for(ai_task, timeout=12)
-                if out:
-                    cache_put(key, (out, backend))
-                    return out, backend
-            except Exception as e:
-                log.warning("AI translation failed: %s", e)
-        else:
-            done, _ = await asyncio.wait({ai_task}, timeout=AI_TRANSLATE_GRACE)
-            if ai_task in done and not ai_task.exception() and ai_task.result()[0]:
-                out, backend = ai_task.result()
-                if out:
-                    cache_put(key, (out, backend))
-                    return out, backend
-            ai_task.cancel()
+    if model_out:
+        cache_put(key, (model_out, model_backend))
+        return model_out, model_backend
     if mt_text:
         cache_put(key, (mt_text, "machine"))
         return mt_text, "machine"
-    prompt = (
-        "You are a professional live subtitle translator for university lectures. "
-        f"Translate into {target}.\n"
-        + (f"Previous context:\n{context}\n" if context else "")
-        + f"Current sentence:\n{text}\n"
-        "Rules: preserve names, numbers, formulas, citations, and technical terms; "
-        "translate naturally as a professional lecture interpreter, not word-for-word; "
-        "do not add explanations or omit information; output ONLY the translation."
-        + _glossary_block()
-    )
+    # both fell through: give the model one more unconstrained try
     try:
-        async with httpx.AsyncClient(timeout=60) as cx:
-            r = await cx.post(
-                f"{CONFIG['url']}/api/generate",
-                json={
-                    "model": CONFIG["model"],
-                    "prompt": prompt,
-                    "stream": False,
-                    "think": False,
-                    "options": {
-                        "temperature": 0.2,
-                        "num_predict": 512,
-                        "stop": ["</think>", "\\n\\n"],
-                    },
-                },
-            )
-            r.raise_for_status()
-            # qwen3 may leak chain-of-thought before the answer; take
-            # everything after an explicit reasoning block if present.
-            return r.json().get("response", "").split("</think>")[-1].strip(), "ollama"
+        out, backend = await asyncio.wait_for(model_task, timeout=60)
+        if out:
+            cache_put(key, (out, backend))
+            return out, backend
     except Exception as e:
-        log.exception("ollama failed")
-        raise HTTPException(502, f"translation backend: {e}")
+        log.warning("final model translation failed: %s", e)
+    raise HTTPException(502, "translation backend unavailable")
 
 
 @app.post("/api/translate")
@@ -738,7 +749,8 @@ async def push_caption(req: CaptionReq):
     norm = "".join(ch for ch in req.text.lower() if ch.isalnum())
     if any(norm == "".join(ch for ch in l["text"].lower() if ch.isalnum()) for l in CAPTIONS[-30:]):
         return {"duplicate": True}
-    context = CAPTIONS[-1]["text"] if CAPTIONS else ""  # previous chunk keeps the interpreter coherent
+    # feed the last few chunks so the translator follows the lecture's thread
+    context = _recent_caption_context(limit=3)
     translation, backend = await translate_text(req.text.strip(), "Chinese (Simplified)", context)
     log.info("caption via %s", backend)
     line = {

@@ -63,6 +63,15 @@ assert all(m in page for m in ["实时字幕", "字幕桥", "问 AI", "导出 Ma
 # --- real model paths ----------------------------------------------------
 assert post("/api/translate", {"text": "Our next lecture covers chapter five."})["text"]
 assert isinstance(post("/api/terms", {"text": "Photosynthesis converts light energy."})["terms"], list)
+# context-aware translation: with an active course topic, ambiguous terms are
+# resolved in-domain (cell -> 细胞, not phone) and glossary terms are honored.
+ctx_sid = post("/api/sessions", {"title": "Cell Biology", "category": "Biology"})["id"]
+post(f"/api/sessions/{ctx_sid}/activate")
+post(f"/api/sessions/{ctx_sid}/glossary", {"term": "Mitochondrion", "zh": "线粒体"})
+ctx_zh = post("/api/translate", {"text": "The cell produces energy using its mitochondria.",
+                                 "context": "We discussed organelles. Mitochondria are the powerhouse."})["text"]
+assert "细胞" in ctx_zh and "线粒体" in ctx_zh, f"context-aware translation drifted: {ctx_zh!r}"
+expect(200, f"/api/sessions/{ctx_sid}", "DELETE")
 
 # --- captions pipeline: translate -> poll -> persist -> dup reject -------
 sid = post("/api/sessions", {"title": "Captions", "category": "Biology"})["id"]
