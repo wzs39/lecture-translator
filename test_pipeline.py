@@ -289,11 +289,17 @@ rc = subprocess.run([venv_py, "bridge/live_captions_bridge.py", "--selfcheck"],
 assert rc.returncode == 0, rc.stdout.decode("utf-8", "replace")[-500:]
 
 # --- error boundaries -----------------------------------------------------
+# Clear the key AND point the base at a dead endpoint: the detect assertion
+# below needs BOTH conditions, and a stale real base from an earlier live run
+# would otherwise make this 400-vs-502 assertion flaky.
 post("/api/config", {"ai_key": "", "ai_base": "http://127.0.0.1:9"})
 expect(400, "/api/captions", "POST", {"text": "   "})
 expect(404, "/api/sessions/deadbeef/activate", "POST")
 expect(404, f"/api/sessions/{sid}")
 expect(400, "/api/ai/detect", detail_contains="API Key")
+# leave the suite with no live key and the dead test base — a clean, explicit
+# state; the user's saved cloud config is deliberately NOT restored (tests must
+# not depend on or mutate real credentials).
 
 # --- test-data cleanup: removes test-named courses + caption log ----------
 clean_sid = post("/api/sessions", {"title": "MigVerify"})["id"]

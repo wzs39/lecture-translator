@@ -404,31 +404,55 @@ def _load_materials(sid: str) -> list:
     return _load_json(_materials_path(sid), {"materials": []}).get("materials", [])
 
 
-def _materials_block() -> str:
+def _materials_block(question: str = "") -> str:
     """Course reference text (slides/notes) the AI uses to correct and supplement
-    the translation. Capped to bound token cost; index the material by topic."""
+    the translation. A 40-page PDF is far larger than any prompt window, so when
+    total extracted text exceeds MATERIALS_TOKENS we select the chunks most
+    relevant to the current question (keyword overlap retrieval — a minimal RAG
+    without embeddings); with no question (translation path) the head+tail are
+    kept. A truncation notice is appended whenever anything was dropped."""
     sid = ACTIVE_SESSION["id"]
     if not sid:
         return ""
-    mats = _load_materials(sid)
+    mats = [m for m in _load_materials(sid) if (m.get("text") or "").strip()]
     if not mats:
         return ""
-    chunks = []
-    total = 0
-    for m in mats:
-        text = (m.get("text") or "").strip()
-        if not text:
-            continue
-        remain = MATERIALS_TOKENS - total
-        if remain <= 0:
-            break
-        chunk = text[:remain]
-        chunks.append(f"## {m.get('name', 'material')}\n{chunk}")
-        total += len(chunk)
+    total_len = sum(len(m["text"]) for m in mats)
+    selected: list[tuple[str, str]] = []  # (name, text)
+    if total_len <= MATERIALS_TOKENS:
+        selected = [(m["name"], m["text"].strip()) for m in mats]
+    else:
+        # split into ~800-char chunks on sentence boundaries, score by keyword
+        # overlap with the question, take the best until the budget is spent
+        q_terms = {w for w in re.findall(r"[\w\u4e00-\u9fff]+", question.lower()) if len(w) > 2}
+        pool: list[tuple[int, str, str]] = []  # (score, name, chunk)
+        for m in mats:
+            for part in re.split(r"(?<=[.!?。！？])\s+", m["text"]):
+                part = part.strip()
+                if not part:
+                    continue
+                if len(pool) and len(pool[-1][2]) < 400 and pool[-1][1] == m["name"]:
+                    prev = pool.pop()
+                    part = prev[2] + " " + part  # merge tiny fragments into ~800c
+                low = part.lower()
+                score = sum(low.count(t) for t in q_terms)
+                pool.append((score, m["name"], part))
+        budget = MATERIALS_TOKENS
+        for score, name, part in sorted(pool, key=lambda x: -x[0]):
+            if budget <= 0:
+                break
+            take = part[:budget]
+            selected.append((name, take))
+            budget -= len(take)
+    chunks, total = [], 0
+    for name, text in selected:
+        chunks.append(f"## {name}\n{text}")
+        total += len(text)
     if not chunks:
         return ""
+    notice = "\n[文档过长，已按问题相关性截断]" if total_len > MATERIALS_TOKENS else ""
     return "\n\nCourse reference material (use it to correct terms and supplement the" \
-           " translation; the lecturer's own slides/notes):\n" + "\n\n".join(chunks)
+           " translation; the lecturer's own slides/notes):\n" + "\n\n".join(chunks) + notice
 
 
 class MaterialReq(BaseModel):
@@ -580,7 +604,7 @@ async def ask(req: AskReq):
         f"lecture says X' unless the lecture actually says X. Be helpful and concrete; use the "
         f"glossary and course materials if relevant.\n"
         f"Answer in {req.target}.\nQuestion: {req.question}\n\nLecture content:\n{context}"
-        + _glossary_block() + _materials_block())
+        + _glossary_block() + _materials_block(req.question))
     try:
         text, backend = await ai_complete(prompt)
         return {"text": text, "model": backend}

@@ -261,7 +261,21 @@ window.fetch = (input, init = {}) => {
 };
 let original = [], lines = [], sessionId = null, pollSince = null;
 
-function setStatus(s, extra="") { $("status").textContent = s + (extra?` · ${extra}`:""); }
+function setStatus(s, extra="") { $("status").textContent = s + (extra ? ` · ${extra}` : ""); }
+// Map backend error responses to readable Chinese hints (key/network/quota/limit)
+async function errText(r) {
+  const j = await r.json().catch(()=>({}));
+  const detail = String(j.detail || r.status);
+  const map = [
+    [/(API Key|api key|未填写|请先填写)/i, "未配置云端 Key：设置 → 填入 API Key"],
+    [/(401|403|Unauthorized|invalid.*key|认证)/i, "Key 无效或过期：检查 API Key"],
+    [/(429|rate.?limit|Too Many)/i, "调用频率超限：稍等几秒自动重试"],
+    [/(timed? ?out|timeout|ConnectError|连接)/i, "网络超时/不可达：检查网络或接口地址"],
+    [/(context length|maximum context|too long|超长)/i, "内容超限：文档过长已截断，请精简"],
+  ];
+  for (const [re, hint] of map) if (re.test(detail)) return `${hint}（${detail.slice(0,80)}）`;
+  return detail.slice(0, 120);
+}
 function escapeHtml(s){return (s||"").replace(/[&<>"']/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));}
 const fmtTs = s => `${String(Math.floor(s/60)).padStart(2,"0")}:${String(Math.round(s%60)).padStart(2,"0")}`;
 
@@ -374,14 +388,15 @@ async function askAI() {
   if (!ctx.trim()) return setStatus("还没有可回答的内容：先听字幕或上传讲义");
   setStatus("asking AI...");
   const r = await fetch("/api/ask", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({question:$("question").value, context:ctx, target:"Chinese (Simplified)"})});
-  const j = await r.json(); if (r.ok) addAiCard("AI回答", j.text); else setStatus("ask failed");
+  const j = await r.json().catch(()=>({}));
+  if (r.ok) addAiCard("AI回答", j.text); else setStatus("AI 问答失败", await errText(r));
 }
 
 async function extractTerms() {
   if (!original.length) return setStatus("nothing to analyze");
   setStatus("extracting terms...");
   const r = await fetch("/api/terms", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({text:original.join(" "), target:"Chinese (Simplified)"})});
-  const j = await r.json(); if (!r.ok) return setStatus("terms failed");
+  const j = await r.json().catch(()=>({})); if (!r.ok) return setStatus("术语提取失败", await errText(r));
   addAiCard("术语表", j.terms.map(x=>`${x.term}: ${x.explanation}`).join("\n"));
   loadGlossary();
 }
