@@ -57,7 +57,7 @@ assert all(m in page for m in ["实时字幕", "字幕桥", "问 AI", "导出 Ma
                                "分类管理", "AI 总结", "saveSummaryBtn",
                                "addCategoryBtn", "summaryList", "cleanTestBtn",
                                "diskWarn", "bridgeDetail", "reviewBtn", "quizBtn", "quizBox",
-                               "loadHistoryBtn", "settingsModal", "cloudTranslate",
+                               "loadHistoryBtn", "settingsModal",
                                "translateBackendHint", "verifyBtn", "uploadMaterial", "materialList",
                                "audioBtn", "audioStop", "audioMode"])
 

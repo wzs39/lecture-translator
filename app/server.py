@@ -143,7 +143,7 @@ class ConfigReq(BaseModel):
     ai_base: str = ""
     ai_key: str | None = None  # None = unchanged; "" = clear
     ai_model: str = ""
-    cloud_translate: bool | None = None  # None = unchanged; use cloud AI for live translation
+    cloud_translate: bool | None = None  # None = unchanged; kept for UI compatibility
     deepseek_key: str = ""  # legacy field name, merged into ai_key
     access_token: str | None = None  # None = unchanged; "" = clear
 
@@ -834,12 +834,12 @@ async def _translate_with_model(text: str, target: str, context: str) -> tuple[s
 async def translate_text(text: str, target: str, context: str = "") -> tuple[str, str]:
     """Returns (translation, backend_used).
 
-    Quality strategy: the context-aware model (cloud AI if a key is set, else
-    local Ollama) is the default and races against free machine translation.
-    If the model lands within AI_TRANSLATE_GRACE seconds its meaning-aware
-    output wins (bounded latency); otherwise the fast machine translation is
-    used as a speed fallback so the live subtitle never stalls. Results are
-    cached against the normalized text + context."""
+    Quality strategy: the context-aware model (cloud AI when a key is set,
+    else local Ollama) is the default and races against free machine
+    translation. If the model lands within AI_TRANSLATE_GRACE seconds its
+    meaning-aware output wins (bounded latency); otherwise the fast machine
+    translation is used as a speed fallback so the live subtitle never
+    stalls. Results are cached against the normalized text + context."""
     context = (context or "")[-TRANSLATE_CONTEXT_CHARS:]
     key = _cache_key(text, target, context)
     hit = cache_get(key)
