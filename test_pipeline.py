@@ -13,7 +13,7 @@ Coverage map (each line asserts one behavior through the real HTTP surface):
   search/stats -> keyword hit with session title; stats row exists
   errors       -> 400/404 boundaries (see table)
 """
-import json, os, subprocess, threading, uuid
+import json, os, subprocess, threading, time, uuid
 import urllib.request, urllib.error, urllib.parse
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -58,7 +58,7 @@ assert all(m in page for m in ["实时字幕", "字幕桥", "问 AI", "导出 Ma
                                "addCategoryBtn", "summaryList", "cleanTestBtn",
                                "diskWarn", "bridgeDetail", "reviewBtn", "quizBtn", "quizBox",
                                "loadHistoryBtn", "settingsModal", "cloudTranslate",
-                               "translateBackendHint", "verifyBtn"])
+                               "translateBackendHint", "verifyBtn", "uploadMaterial", "materialList"])
 
 # --- real model paths ----------------------------------------------------
 assert post("/api/translate", {"text": "Our next lecture covers chapter five."})["text"]
@@ -159,6 +159,23 @@ assert "CRISPR" in v["candidates"] and "glycolysis" not in v["candidates"], v
 assert v["baseline_words"] == 6
 expect(400, "/api/verify", "POST", {"text": "   "})
 
+# --- course materials: upload a reference file, list, reject bad types -----
+import base64 as _b64
+msid = post("/api/sessions", {"title": "MaterialsCourse"})["id"]
+post(f"/api/sessions/{msid}/activate")
+_txt = "Mitochondria are the powerhouse. 线粒体是动力工厂.\n" * 20
+mats = post(f"/api/sessions/{msid}/materials", {"name": "ch2.txt",
+            "content_b64": _b64.b64encode(_txt.encode()).decode()})
+assert any(m["name"] == "ch2.txt" and m["chars"] >= len(_txt) for m in mats["materials"]), mats
+# unsupported extension -> 415
+expect(415, f"/api/sessions/{msid}/materials", "POST", {"name": "x.exe", "content_b64": _b64.b64encode(b"MZ").decode()})
+# empty content -> 400
+expect(400, f"/api/sessions/{msid}/materials", "POST", {"name": "x.txt", "content_b64": ""})
+assert any(m["name"] == "ch2.txt" for m in get(f"/api/sessions/{msid}/materials")["materials"])
+expect(200, f"/api/sessions/{msid}/materials?name=ch2.txt", "DELETE")
+assert all(m["name"] != "ch2.txt" for m in get(f"/api/sessions/{msid}/materials")["materials"])
+expect(200, f"/api/sessions/{msid}", "DELETE")
+
 # --- cloud-translate toggle: persists and round-trips ---------------------
 cfg0 = get("/api/config")
 assert post("/api/config", {"cloud_translate": True})["cloud_translate"] is True
@@ -200,6 +217,12 @@ marker = f"quasimodo {uuid.uuid4().hex[:6]}"
 sid2 = post("/api/sessions", {"title": "Search"})["id"]
 post(f"/api/sessions/{sid2}/activate")
 post("/api/captions", {"text": f"The hunchback {marker} rang the bell.", "offset": 5.0})
+# caption persist is batched; converge until the search sees the stored segment
+for _ in range(20):
+    if any(marker in h["text"] and h["session"] == "Search"
+           for h in get(f"/api/search?q={urllib.parse.quote(marker)}")["hits"]):
+        break
+    time.sleep(0.5)
 assert any(marker in h["text"] and h["session"] == "Search"
            for h in get(f"/api/search?q={urllib.parse.quote(marker)}")["hits"])
 assert any(x["title"] == "Search" and x["segments"] >= 1 for x in get("/api/stats")["courses"])

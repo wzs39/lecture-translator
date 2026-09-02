@@ -16,6 +16,8 @@ import json
 import re
 import uuid
 import threading
+import base64
+import io
 from pathlib import Path
 
 import httpx
@@ -180,6 +182,9 @@ def stats():
             s = json.loads(p.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
+        # merge any still-buffered caption lines so live stats are current
+        if s.get("id") in _pending_session_lines:
+            s.setdefault("transcript", []).extend(_pending_session_lines[s["id"]])
         tr = s.get("transcript", [])
         out.append({"title": s.get("title", ""), "created": s.get("created_at", ""),
                     "segments": len(tr),
@@ -361,6 +366,121 @@ def _translation_system() -> str:
     return prefix
 
 
+# ---- course materials (uploaded PDF/PPTX/DOCX/TXT reference files) ------ #
+MATERIALS_TOKENS = 6000  # ~1500-2500 tokens of reference text injected into AI prompts
+
+
+def _materials_path(sid: str) -> Path:
+    return DATA_DIR / f"materials-{sid}.json"
+
+
+def _load_materials(sid: str) -> list:
+    return _load_json(_materials_path(sid), {"materials": []}).get("materials", [])
+
+
+def _materials_block() -> str:
+    """Course reference text (slides/notes) the AI uses to correct and supplement
+    the translation. Capped to bound token cost; index the material by topic."""
+    sid = ACTIVE_SESSION["id"]
+    if not sid:
+        return ""
+    mats = _load_materials(sid)
+    if not mats:
+        return ""
+    chunks = []
+    total = 0
+    for m in mats:
+        text = (m.get("text") or "").strip()
+        if not text:
+            continue
+        remain = MATERIALS_TOKENS - total
+        if remain <= 0:
+            break
+        chunk = text[:remain]
+        chunks.append(f"## {m.get('name', 'material')}\n{chunk}")
+        total += len(chunk)
+    if not chunks:
+        return ""
+    return "\n\nCourse reference material (use it to correct terms and supplement the" \
+           " translation; the lecturer's own slides/notes):\n" + "\n\n".join(chunks)
+
+
+class MaterialReq(BaseModel):
+    name: str = "material"
+    content_b64: str = ""
+
+
+def _extract_text(name: str, data: bytes) -> str:
+    """Pull readable text from an uploaded PDF/PPTX/DOCX/TXT/MD file."""
+    lower = name.lower()
+    import io
+    if lower.endswith(".pdf"):
+        from pypdf import PdfReader
+        rd = PdfReader(io.BytesIO(data))
+        return "\n".join((p.extract_text() or "") for p in rd.pages)
+    if lower.endswith(".docx"):
+        import docx
+        d = docx.Document(io.BytesIO(data))
+        return "\n".join(p.text for p in d.paragraphs)
+    if lower.endswith(".pptx"):
+        from pptx import Presentation
+        prs = Presentation(io.BytesIO(data))
+        out = []
+        for slide in prs.slides:
+            for shape in slide.shapes:
+                if hasattr(shape, "text") and getattr(shape, "text", "").strip():
+                    out.append(shape.text.strip())
+        return "\n".join(out)
+    if lower.endswith((".txt", ".md", ".text")) or not lower:
+        try:
+            return data.decode("utf-8")
+        except UnicodeDecodeError:
+            return data.decode("utf-8", errors="replace")
+    raise ValueError(f"unsupported file type: {name}")
+
+
+@app.post("/api/sessions/{sid}/materials")
+def add_material(sid: str, req: MaterialReq):
+    """Upload a lecture reference file and extract its text for the AI."""
+    _session_path(sid)  # 404 unless the course exists
+    if not req.content_b64:
+        raise HTTPException(400, "content is required")
+    import base64
+    try:
+        data = base64.b64decode(req.content_b64)
+    except Exception as e:
+        raise HTTPException(400, f"invalid base64: {e}")
+    try:
+        text = _extract_text(req.name, data)
+    except ValueError as e:
+        raise HTTPException(415, str(e))
+    except Exception as e:
+        raise HTTPException(422, f"could not parse {req.name}: {e}")
+    if not text.strip():
+        raise HTTPException(422, f"no readable text found in {req.name} (scanned PDF?)")
+    mats = _load_materials(sid)
+    mats = [m for m in mats if m.get("name") != req.name]  # replace same-named
+    mats.insert(0, {"name": req.name, "text": text, "chars": len(text)})
+    _save_json(_materials_path(sid), {"materials": mats})
+    return {"materials": [{"name": m["name"], "chars": m["chars"]} for m in mats]}
+
+
+@app.get("/api/sessions/{sid}/materials")
+def list_materials(sid: str):
+    _session_path(sid)
+    return {"materials": [{"name": m["name"], "chars": m["chars"]} for m in _load_materials(sid)]}
+
+
+@app.delete("/api/sessions/{sid}/materials")
+def delete_material(sid: str, name: str = ""):
+    _session_path(sid)
+    mats = _load_materials(sid)
+    mats = [m for m in mats if m.get("name") != name]
+    _save_json(_materials_path(sid), {"materials": mats})
+    return {"materials": [{"name": m["name"], "chars": m["chars"]} for m in mats]}
+
+
+
 @app.post("/api/sessions/{sid}/notes")
 def save_session_notes(sid: str, req: NotesReq):
     """Save the student's own notes; AI output never overwrites them."""
@@ -410,7 +530,7 @@ async def ask(req: AskReq):
         context = "[...较早内容省略...]" + context[-ASK_CONTEXT_CHARS:]
     prompt = ("只根据下面的课堂原文回答问题。无法从原文确定时明确说不知道，禁止编造。"
               f"用{req.target}回答，并引用相关原文。\n问题：{req.question}\n课堂原文：{context}"
-              + _glossary_block())
+              + _glossary_block() + _materials_block())
     try:
         text, backend = await ai_complete(prompt)
         return {"text": text, "model": backend}
@@ -442,8 +562,18 @@ def _session_path(sid: str) -> Path:
 
 
 @app.get("/api/sessions/{sid}")
+def _session_with_pending(sid: str) -> dict:
+    """The session JSON plus any still-buffered (not yet flushed) caption lines,
+    so reads stay consistent with writes without forcing a flush per caption."""
+    s = json.loads(_session_path(sid).read_text(encoding="utf-8"))
+    pending = _pending_session_lines.get(sid)
+    if pending:
+        s.setdefault("transcript", []).extend(pending)
+    return s
+
+
 def get_session(sid: str):
-    return json.loads(_session_path(sid).read_text(encoding="utf-8"))
+    return _session_with_pending(sid)
 
 
 @app.post("/api/terms")
@@ -454,7 +584,8 @@ async def terms(req: OrganizeReq):
     # object shape {"terms": [...]} instead of a bare array
     prompt = (f"从以下讲座原文提取所有重要专业术语（最多20个）。"
               f"输出一个JSON对象：{{\"terms\": [{{\"term\": \"英文术语\", \"explanation\": \"用{req.target}给出的中文解释\"}}]}}。"
-              f"每个术语都要包含，不要编造。\n原文：\n{cap_long_text(req.text)}")
+              f"每个术语都要包含，不要编造。\n原文：\n{cap_long_text(req.text)}"
+              + _glossary_block() + _materials_block())
     try:
         text, _ = await ai_complete(prompt, json_mode=True)
         value = json.loads(text)
@@ -523,6 +654,9 @@ def delete_session(sid: str):
     if ACTIVE_SESSION["id"] == sid:
         ACTIVE_SESSION["id"] = None
     path.unlink()
+    mp = _materials_path(sid)  # remove uploaded reference files too
+    if mp.is_file():
+        mp.unlink()
     return {"deleted": sid}
 
 
@@ -534,7 +668,13 @@ def clear_captions_log():
     return {"cleared": True}
 
 
-TEST_TITLES = {"Search", "CatSession", "MigVerify", "Captions", "Glossary", "Soak"}
+TEST_TITLES = {
+    "Search", "CatSession", "MigVerify", "Captions", "Glossary", "Soak",
+    "Contract", "Live check", "Biology", "Math", "Physics lecture",
+    "Notes test", "Notes test 2", "NotesCourse", "Preview \u8bfe\u7a0b",
+    "HistVerify", "FinalVerify", "ReviewVerify", "Debug", "ces",
+    "VerifyAll", "ExtractTest", "PdfTest", "MaterialsCourse", "release-check-21a0e2",
+}
 
 
 @app.post("/api/test-cleanup")
@@ -547,6 +687,9 @@ def test_cleanup():
             if s.get("title") in TEST_TITLES:
                 p.unlink()
                 deleted.append(s["id"])
+                mp = DATA_DIR / f"materials-{s['id']}.json"
+                if mp.is_file():
+                    mp.unlink()
         except (OSError, json.JSONDecodeError):
             pass
     if ACTIVE_SESSION["id"] in deleted:
@@ -590,7 +733,7 @@ async def organize(req: OrganizeReq):
     prompt = (
         f"整理以下讲座原文，输出{req.target}的结构化笔记。保留专业术语和关键事实，"
         "不要编造内容。输出：1.核心要点 2.术语 3.待确认问题。只输出整理结果。\n\n"
-        + cap_long_text(req.text) + _glossary_block()
+        + cap_long_text(req.text) + _glossary_block() + _materials_block()
     )
     try:
         text, backend = await ai_complete(prompt)
@@ -657,7 +800,7 @@ async def _translate_with_model(text: str, target: str, context: str) -> tuple[s
         "natural spoken lecture in Chinese; preserve names, numbers, formulas, and "
         "technical terms; resolve ambiguous words against the course topic/glossary; "
         "do not add explanations or omit information; output ONLY the translation."
-        + _glossary_block()
+        + _glossary_block() + _materials_block()
     )
     return await ai_complete(prompt)
 
@@ -861,6 +1004,9 @@ def search_sessions(q: str = ""):
             s = json.loads(p.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
+        # merge any still-buffered caption lines so search sees fresh content
+        if s.get("id") in _pending_session_lines:
+            s.setdefault("transcript", []).extend(_pending_session_lines[s["id"]])
         for seg in s.get("transcript", []):
             hay = (seg.get("text", "") + " " + seg.get("translation", "")).lower()
             if q in hay:
