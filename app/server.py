@@ -331,6 +331,26 @@ def _glossary_block() -> str:
     return f"\nCourse glossary (use these EXACT renderings):\n{lines}\n"
 
 
+@app.get("/api/glossary/terms")
+def export_glossary_terms(sid: str = ""):
+    """Flat list of glossary terms for Whisper vocabulary boosting
+    (xuexi/system_audio_client.py syncs its terms.txt from here).
+    sid=<session id> limits to that course; default = active session."""
+    target = sid or ACTIVE_SESSION["id"]
+    if not target:
+        return {"terms": []}
+    try:
+        s = json.loads((DATA_DIR / f"session-{target}.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        raise HTTPException(404, "session not found")
+    g = s.get("glossary", {})
+    if not isinstance(g, dict):
+        return {"terms": []}
+    # term first, zh in parens as a hint (context cap is ~1000 chars client-side)
+    terms = [t if not zh or t == zh else f"{t} ({zh})" for t, zh in g.items()]
+    return {"terms": terms, "session": s.get("title", "")}
+
+
 def _course_topic() -> str:
     """Short subject line ('<title> · <category>') for the active course, so a
     translator knows the lecture's domain and keeps ambiguous terms in context
