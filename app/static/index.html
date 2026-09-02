@@ -91,6 +91,7 @@
         <button id="saveSrt" class="ghost">导出 SRT 字幕</button>
         <button id="saveDoc" class="ghost">导出 Word</button>
         <button id="loadHistoryBtn" class="ghost" onclick="loadHistory()">📥 加载完整记录</button>
+        <button id="clearStreamBtn" class="ghost">🧹 清空字幕流</button>
         <span style="color:var(--dim);font-size:12px">当前课程全部原文+翻译，可随时复看</span>
       </div>
       <div id="subs"></div>
@@ -98,7 +99,7 @@
   </div>
   <div class="col">
     <div class="panel">
-      <div class="step">课堂 AI 问答与笔记（不影响字幕）</div>
+      <div class="step">课堂 AI 问答与笔记（AI 只读「清空字幕流」之后的字幕）</div>
       <div class="row">
         <input id="question" placeholder="问这节课的问题" style="flex:1;min-width:160px">
         <button id="askBtn" class="ghost">问 AI</button>
@@ -250,6 +251,19 @@ function addAiCard(title, text) {
   $("aiOut").prepend(d);
   while ($("aiOut").children.length > 20) $("aiOut").lastChild.remove();
 }
+
+// Clear the caption stream AND the AI context. The AI (ask/terms/organize)
+// reads `original`, so a stale history would leak old lecture content into
+// new answers. Clearing resyncs the poll cursor so nothing old re-renders —
+// the persisted course transcript on the server is NOT touched.
+$("clearStreamBtn").onclick = () => {
+  $("subs").innerHTML = "";
+  original = []; lines = [];
+  (async () => {
+    try { const b = await (await fetch("/api/captions?since=0")).json(); pollSince = b.next; } catch {}
+  })();
+  setStatus("字幕流已清空", "AI 现在只读之后的新字幕");
+};
 
 // Poll the caption buffer the bridge feeds; ingest new lines as they land.
 async function poll() {
