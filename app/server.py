@@ -522,11 +522,13 @@ def save_session_notes(sid: str, req: NotesReq):
 
 
 async def ai_complete(prompt: str, json_mode: bool = False, timeout_s: int = 120):
-    """AI Q&A backend: any OpenAI-compatible web AI when an API key is
-    configured (DeepSeek, GLM-4-Flash free tier, Groq, OpenRouter, ...),
-    local Ollama otherwise. Returns (text, backend)."""
+    """AI backend for every AI task (translate, ask, organize, terms, quiz):
+    any OpenAI-compatible cloud AI when a key is configured (DeepSeek, GLM-4-Flash
+    free tier, Groq, OpenRouter, ...), local Ollama otherwise. A cloud failure
+    trips a short cooldown so a dead/rate-limited endpoint costs one failed call,
+    not one per caption. Returns (text, backend)."""
     key = CONFIG["ai_key"]
-    if key:
+    if key and _cloud_available("ai"):
         try:
             async with httpx.AsyncClient(timeout=timeout_s) as cx:
                 body = {"model": CONFIG["ai_model"],
@@ -537,9 +539,12 @@ async def ai_complete(prompt: str, json_mode: bool = False, timeout_s: int = 120
                 r = await cx.post(f"{CONFIG['ai_base']}/chat/completions",
                                   headers={"Authorization": f"Bearer {key}"}, json=body)
                 r.raise_for_status()
+                _cloud_cooldowns.pop("ai", None)  # healthy again
                 return r.json()["choices"][0]["message"]["content"].strip(), CONFIG["ai_model"]
         except Exception as e:
-            log.warning("cloud AI failed, falling back to ollama: %s", e)
+            _mark_rate_limited("ai")
+            log.warning("cloud AI failed, falling back to ollama (cooling down %ss): %s",
+                        RATE_LIMIT_COOLDOWN, e)
     async with httpx.AsyncClient(timeout=120) as cx:
         body = {"model": CONFIG["model"], "prompt": prompt, "stream": False,
                 "think": False, "options": {"temperature": 0.2, "num_predict": 1024}}
@@ -770,6 +775,10 @@ async def self_check():
     checks["memory"] = {"live_captions": len(CAPTIONS), "live_caption_limit": CAPTIONS_MAX,
                         "translation_cache": len(_translation_cache), "translation_cache_limit": TRANSLATION_CACHE_MAX,
                         "pending_session_flush": pending}
+    ai = "off" if not CONFIG["ai_key"].strip() else (
+        "cooldown" if not _cloud_available("ai") else "cloud")
+    checks["ai"] = {"backend": ai, "model": CONFIG["ai_model"] or None,
+                    "cooldown_left_s": round(max(0.0, _cloud_cooldowns.get("ai", 0.0) - time.monotonic()))}
     checks["ready"] = checks["ollama"] is True and checks["model"] == "ok" and checks["data_dir"] is True
     return checks
 
@@ -851,7 +860,8 @@ async def _translate_with_model(text: str, target: str, context: str) -> tuple[s
         "do not add explanations or omit information; output ONLY the translation."
         + _glossary_block() + _materials_block()
     )
-    return await ai_complete(prompt)
+    # bounded so a hung cloud endpoint cannot stall the final retry for 2 minutes
+    return await ai_complete(prompt, timeout_s=45)
 
 
 async def translate_text(text: str, target: str, context: str = "") -> tuple[str, str]:
@@ -869,13 +879,15 @@ async def translate_text(text: str, target: str, context: str = "") -> tuple[str
     if hit is not None:
         return hit[0], "cache"
     to = CLOUD_TARGET.get(target, "zh-CN")
-    # kick off the context-aware model first
+    # kick off the context-aware model first; shielded so the 2.5s grace
+    # timeout does NOT cancel it — the final retry below still awaits it
     model_task = asyncio.create_task(_translate_with_model(text, target, context))
     model_out, model_backend = None, None
     try:
-        model_out, model_backend = await asyncio.wait_for(model_task, timeout=AI_TRANSLATE_GRACE)
-    except (asyncio.TimeoutError, asyncio.CancelledError):
-        pass  # do NOT cancel: the task stays alive for the final retry below
+        model_out, model_backend = await asyncio.wait_for(
+            asyncio.shield(model_task), timeout=AI_TRANSLATE_GRACE)
+    except asyncio.TimeoutError:
+        pass  # task keeps running; MT covers meanwhile, final retry collects it
     except Exception as e:
         log.warning("model translation failed: %s", e)
     # machine translation as the bounded-speed fallback / first coverage
@@ -902,11 +914,10 @@ async def translate_text(text: str, target: str, context: str = "") -> tuple[str
     if mt_text:
         cache_put(key, (mt_text, "machine"))
         return mt_text, "machine"
-    # both fell through: give the model one more unconstrained try. The task
-    # may still be running (never cancelled above). CancelledError must be
-    # caught too — it derives from BaseException, not Exception.
+    # both fell through: the model task is still running (never cancelled
+    # above thanks to the shield) — give it one final unconstrained try.
     try:
-        out, backend = await asyncio.wait_for(model_task, timeout=60)
+        out, backend = await asyncio.wait_for(asyncio.shield(model_task), timeout=60)
         if out:
             cache_put(key, (out, backend))
             return out, backend
