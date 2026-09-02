@@ -57,7 +57,8 @@ assert all(m in page for m in ["实时字幕", "字幕桥", "问 AI", "导出 Ma
                                "分类管理", "AI 总结", "saveSummaryBtn",
                                "addCategoryBtn", "summaryList", "cleanTestBtn",
                                "diskWarn", "bridgeDetail", "reviewBtn", "quizBtn", "quizBox",
-                               "loadHistoryBtn"])
+                               "loadHistoryBtn", "settingsModal", "cloudTranslate",
+                               "translateBackendHint"])
 
 # --- real model paths ----------------------------------------------------
 assert post("/api/translate", {"text": "Our next lecture covers chapter five."})["text"]
@@ -118,7 +119,7 @@ old_cfg = get("/api/config")
 mock = HTTPServer(("127.0.0.1", 0), MockAI)
 threading.Thread(target=mock.serve_forever, daemon=True).start()
 post("/api/config", {"ai_base": f"http://host.docker.internal:{mock.server_address[1]}/v1",
-                     "ai_key": "test", "ai_model": "mock-model"})
+                     "ai_key": "test", "ai_model": "mock-model", "cloud_translate": True})
 post(f"/api/sessions/{gsid}/glossary", {"term": "Mitokondrio", "zh": "线粒体"})  # restore for injection
 post("/api/captions", {"text": f"The Mitokondrio produces energy {uuid.uuid4().hex[:6]} for the cell.", "offset": 88.0})
 assert "Mitokondrio=线粒体" in captured.get("prompt", ""), "glossary must reach the AI prompt"
@@ -136,6 +137,14 @@ expect(400, "/api/quiz", "POST", {"category": "EmptyQuizCat"})
 expect(200, f"/api/summaries/{qsum}", "DELETE")
 post("/api/config", old_cfg)
 mock.shutdown()
+
+# --- cloud-translate toggle: persists and round-trips ---------------------
+cfg0 = get("/api/config")
+assert post("/api/config", {"cloud_translate": True})["cloud_translate"] is True
+assert get("/api/config")["cloud_translate"] is True
+assert post("/api/config", {"cloud_translate": False})["cloud_translate"] is False
+assert get("/api/config")["cloud_translate"] is False
+post("/api/config", {"cloud_translate": cfg0["cloud_translate"]})  # restore
 
 # --- heartbeat, search, stats --------------------------------------------
 post("/api/bridge/heartbeat", {})

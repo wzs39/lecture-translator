@@ -31,7 +31,7 @@ OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://ollama:11434")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen3:4b")
 CONFIG = {"url": OLLAMA_URL, "model": OLLAMA_MODEL,
           "ai_base": "https://api.deepseek.com", "ai_key": "", "ai_model": "deepseek-chat",
-          "access_token": os.environ.get("ACCESS_TOKEN", "")}
+          "cloud_translate": False, "access_token": os.environ.get("ACCESS_TOKEN", "")}
 
 
 app = FastAPI(title="lecture-translator")
@@ -141,13 +141,34 @@ class ConfigReq(BaseModel):
     ai_base: str = ""
     ai_key: str | None = None  # None = unchanged; "" = clear
     ai_model: str = ""
+    cloud_translate: bool | None = None  # None = unchanged; use cloud AI for live translation
     deepseek_key: str = ""  # legacy field name, merged into ai_key
     access_token: str | None = None  # None = unchanged; "" = clear
 
 
+RUNTIME_CONFIG_FILE = DATA_DIR / "runtime-config.json"  # survives container restarts
+
+
+def _load_runtime_config() -> None:
+    saved = _load_json(RUNTIME_CONFIG_FILE, {})
+    for k in ("url", "model", "ai_base", "ai_key", "ai_model"):
+        if isinstance(saved.get(k), str) and saved[k]:
+            CONFIG[k] = saved[k]
+    if isinstance(saved.get("cloud_translate"), bool):
+        CONFIG["cloud_translate"] = saved["cloud_translate"]
+
+
+def _save_runtime_config() -> None:
+    try:
+        _save_json(RUNTIME_CONFIG_FILE, {k: CONFIG[k] for k in
+                   ("url", "model", "ai_base", "ai_key", "ai_model", "cloud_translate")})
+    except OSError as e:
+        log.warning("runtime config save failed: %s", e)
+
+
 @app.get("/api/config")
 def get_config():
-    return {k: CONFIG[k] for k in ("url", "model", "ai_base", "ai_key", "ai_model")}
+    return {k: CONFIG[k] for k in ("url", "model", "ai_base", "ai_key", "ai_model", "cloud_translate")}
 
 
 @app.get("/api/stats")
@@ -181,11 +202,14 @@ def set_config(req: ConfigReq):
         CONFIG["ai_key"] = req.ai_key.strip()
     if req.ai_model.strip():
         CONFIG["ai_model"] = req.ai_model.strip()
+    if req.cloud_translate is not None:
+        CONFIG["cloud_translate"] = req.cloud_translate
     if req.deepseek_key.strip():  # legacy clients
         CONFIG["ai_key"] = req.deepseek_key.strip()
     if req.access_token is not None:  # explicit empty string clears it
         CONFIG["access_token"] = req.access_token.strip()
-    return {k: CONFIG[k] for k in ("url", "model", "ai_base", "ai_key", "ai_model")}
+    _save_runtime_config()
+    return {k: CONFIG[k] for k in ("url", "model", "ai_base", "ai_key", "ai_model", "cloud_translate")}
 
 
 # ---- token economy for the cloud AI ----
@@ -587,11 +611,13 @@ async def translate_text(text: str, target: str, context: str = "") -> tuple[str
     """Returns (translation, backend_used).
 
     Speed strategy: machine translation (usually < 1.5 s) runs first; when
-    an AI key is configured the AI interpreter version races it in a
-    parallel task and wins if it lands within AI_TRANSLATE_GRACE seconds —
-    latency is bounded by machine translation, quality by the AI. Ollama
-    is the offline last resort. Results are cached: repeated sentences
-    (lectures repeat a lot) cost zero tokens and zero latency."""
+    an AI key is configured AND cloud_translate is enabled, the AI
+    interpreter version races it in a parallel task and wins if it lands
+    within AI_TRANSLATE_GRACE seconds — latency is bounded by machine
+    translation, quality by the AI. With cloud_translate off the free
+    machine translation wins outright (zero token cost). Ollama is the
+    offline last resort. Results are cached: repeated sentences (lectures
+    repeat a lot) cost zero tokens and zero latency."""
     context = (context or "")[-TRANSLATE_CONTEXT_CHARS:]
     key = _cache_key(text, target, context)
     hit = cache_get(key)
@@ -599,23 +625,25 @@ async def translate_text(text: str, target: str, context: str = "") -> tuple[str
         return hit[0], "cache"
     to = CLOUD_TARGET.get(target, "zh-CN")
     mt_text = None
-    for name, cloud in (("google", google_translate), ("mymemory", mymemory_translate)):
-        if not _cloud_available(name):
-            continue
-        try:
-            out = await asyncio.wait_for(cloud(text, to), timeout=4)
-            if out:
-                mt_text = out
-                break
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code in (429, 403):
-                _mark_rate_limited(name)
-            else:
+    if not CONFIG["cloud_translate"]:
+        # Cloud AI translation disabled: free machine translation only, no token cost
+        for name, cloud in (("google", google_translate), ("mymemory", mymemory_translate)):
+            if not _cloud_available(name):
+                continue
+            try:
+                out = await asyncio.wait_for(cloud(text, to), timeout=4)
+                if out:
+                    mt_text = out
+                    break
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code in (429, 403):
+                    _mark_rate_limited(name)
+                else:
+                    log.warning("%s failed: %s", cloud.__name__, e)
+            except Exception as e:
                 log.warning("%s failed: %s", cloud.__name__, e)
-        except Exception as e:
-            log.warning("%s failed: %s", cloud.__name__, e)
 
-    if CONFIG["ai_key"]:
+    if CONFIG["ai_key"] and CONFIG["cloud_translate"]:
         prompt = (
             "You are a professional live interpreter for university lectures. "
             f"Translate the current chunk into {target}.\n"
@@ -1060,6 +1088,7 @@ def delete_summary(sid: str):
 async def warm_ollama():
     """Preload the model at startup so the first real caption doesn't pay
     the cold-start load (8-10 s). Fire-and-forget: failures just log."""
+    _load_runtime_config()  # restore saved settings (incl. cloud-translate toggle)
     async def _warm():
         try:
             async with httpx.AsyncClient(timeout=300) as cx:

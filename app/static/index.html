@@ -37,9 +37,43 @@
 </style>
 </head>
 <body>
-<h1>Lecture Translator</h1>
+<h1>Lecture Translator
+  <button id="settingsBtn" class="ghost" style="font-size:13px;padding:6px 14px;vertical-align:middle">⚙ 设置</button>
+</h1>
 <div class="sub">Windows 实时字幕（高质量识别）→ 本地 AI 翻译 → 课堂笔记。翻译与整理在 Docker 容器内，识别用 Windows 自带字幕。</div>
 <div id="diskWarn" style="display:none;background:#7f1d1d;color:#ffd7d7;padding:7px 12px;border-radius:8px;margin-bottom:10px;font-size:13px">⚠️ D 盘剩余空间不足 <b>20GB</b>（当前 <span id="diskFreeText"></span> GB）——Docker 数据盘会把 D 盘写满，请立即清理磁盘或导出课程后释放空间。</div>
+
+<!-- settings dialog: keeps the main page clean; opened via ⚙ 设置 -->
+<div id="settingsModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:50" onclick="if(event.target===this)this.style.display='none'">
+  <div class="section" style="margin:60px auto;max-width:720px;position:relative">
+    <div class="step">⚙ AI 服务设置</div>
+    <div class="row">
+      <strong style="color:var(--fg)">本地 Ollama（默认优先/离线可用）</strong>
+      <input id="apiUrl" aria-label="本地 Ollama 地址" placeholder="本地地址，如 http://ollama:11434">
+      <input id="apiModel" aria-label="本地 Ollama 模型" placeholder="本地模型，如 qwen3:4b-instruct" style="min-width:200px">
+      <button id="saveConfig" class="ghost">保存本地配置</button>
+    </div>
+    <div class="row" style="margin-top:12px">
+      <span style="color:var(--dim);font-size:13px"><strong>云端 AI（可选）</strong>：留空 API Key 即只使用本地 Ollama；云端失败也会回退本地。</span>
+    </div>
+    <div class="row" style="margin-top:6px">
+      <input id="aiBase" placeholder="接口地址，如 https://api.deepseek.com 或 https://open.bigmodel.cn/api/paas/v4" style="min-width:330px">
+      <input id="aiKey" type="password" placeholder="API Key" style="min-width:160px">
+      <input id="aiModelName" placeholder="模型名，如 glm-4-flash / deepseek-chat" style="min-width:230px">
+      <button id="saveAi" class="ghost">保存云端 AI</button>
+      <button id="detectBtn" class="ghost">自动识别模型</button>
+    </div>
+    <div class="row" style="margin-top:12px">
+      <label style="font-size:14px;cursor:pointer"><input id="cloudTranslate" type="checkbox" style="vertical-align:-2px;margin-right:6px">使用云端 AI 翻译字幕（更自然，但消耗 token；关闭则用免费机翻 + 本地兜底）</label>
+    </div>
+    <div class="row" style="margin-top:6px">
+      <span id="aiHint" style="color:var(--dim);font-size:12px">问 AI / 整理 / 术语始终优先云端（填了 Key 时）；上面的开关只控制字幕翻译走不走云端。</span>
+    </div>
+    <div class="row" style="margin-top:14px;justify-content:flex-end">
+      <button id="settingsClose" class="ghost">关闭</button>
+    </div>
+  </div>
+</div>
 
 <div class="section">
   <div class="row">
@@ -56,6 +90,7 @@
       <div class="step">② 服务状态</div>
       <div class="row">
     <span id="status">idle</span>
+    <span id="translateBackendHint" style="color:var(--dim);font-size:12px"></span>
     <span id="bridgeLamp" style="color:var(--dim);font-size:13px">● 桥状态未知</span>
     <span id="bridgeDetail" style="color:var(--dim);font-size:12px"></span>
     <button id="checkBtn" class="ghost">检查服务</button>
@@ -134,30 +169,7 @@
 </div>
 
 <div class="section">
-  <div class="step">⑤ AI 服务设置</div>
-  <div class="row">
-    <strong style="color:var(--fg)">本地 Ollama（默认优先/离线可用）</strong>
-    <input id="apiUrl" aria-label="本地 Ollama 地址" placeholder="本地地址，如 http://ollama:11434">
-    <input id="apiModel" aria-label="本地 Ollama 模型" placeholder="本地模型，如 qwen3:4b-instruct" style="min-width:200px">
-    <button id="saveConfig" class="ghost">保存本地配置</button>
-  </div>
-  <div class="row" style="margin-top:10px">
-    <span style="color:var(--dim);font-size:13px"><strong>云端 AI（可选）</strong>：留空 API Key 即只使用上面的本地 Ollama；云端失败也会回退本地。</span>
-  </div>
-  <div class="row" style="margin-top:6px">
-    <input id="aiBase" placeholder="接口地址，如 https://api.deepseek.com 或 https://open.bigmodel.cn/api/paas/v4" style="min-width:330px">
-    <input id="aiKey" type="password" placeholder="API Key" style="min-width:160px">
-    <input id="aiModelName" placeholder="模型名，如 glm-4-flash / deepseek-chat" style="min-width:230px">
-    <button id="saveAi" class="ghost">保存云端 AI</button>
-    <button id="detectBtn" class="ghost">自动识别模型</button>
-  </div>
-  <div class="row" style="margin-top:6px">
-    <span id="aiHint" style="color:var(--dim);font-size:12px">不填 Key 时问 AI / 整理 / 术语使用本地 Qwen；填入免费 Key 后由云端大模型回答，失败仍自动回退本地。</span>
-  </div>
-</div>
-
-<div class="section">
-  <div class="step">⑥ 存储管理（课程归档与复看）</div>
+  <div class="step">⑤ 存储管理（课程归档与复看）</div>
   <div class="row">
     <select id="categoryFilter"><option value="">全部分类</option></select>
     <label><input id="showArchived" type="checkbox"> 显示已归档</label>
@@ -376,8 +388,25 @@ async function loadConfig() {
     const c = await (await fetch("/api/config")).json();
     $("apiUrl").value = c.url; $("apiModel").value = c.model;
     $("aiBase").value = c.ai_base; $("aiKey").value = c.ai_key; $("aiModelName").value = c.ai_model;
+    $("cloudTranslate").checked = !!c.cloud_translate;
+    updateCloudHint(c.cloud_translate, c.ai_key);
   } catch {}
 }
+function updateCloudHint(on, hasKey) {
+  const s = $("translateBackendHint");
+  if (!s) return;
+  s.textContent = on && hasKey ? "字幕翻译：☁️ 云端 AI"
+    : on && !hasKey ? "字幕翻译：云端已选但未填 Key → 本地" : "字幕翻译：免费机翻 + 本地兜底";
+}
+// settings dialog open/close
+$("settingsBtn").onclick = () => { $("settingsModal").style.display = "block"; loadConfig(); };
+$("settingsClose").onclick = () => $("settingsModal").style.display = "none";
+$("cloudTranslate").onchange = async e => {
+  const r = await fetch("/api/config", {method:"POST", headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({cloud_translate: e.target.checked})});
+  if (r.ok) { const j = await r.json(); updateCloudHint(j.cloud_translate, j.ai_key); setStatus(e.target.checked ? "字幕翻译改用云端 AI" : "字幕翻译改回免费机翻"); }
+  else setStatus("开关保存失败");
+};
 $("saveConfig").onclick = async () => {
   setStatus("保存本地配置...");
   const r = await fetch("/api/config", {method:"POST", headers:{"Content-Type":"application/json"},
@@ -569,7 +598,7 @@ $("saveSummaryBtn").onclick = async () => {
   const r = await fetch("/api/summaries", {method:"POST", headers:{"Content-Type":"application/json"},
     body: JSON.stringify({category: cat, title: `AI 整理 ${new Date().toISOString().slice(0,10)}`, text: lastOrganizeText})});
   if (!r.ok) return setStatus("save summary failed");
-  $("summarySaveHint").textContent = `✅ 已保存到「${cat}」，去 ⑥ 存储管理按分类复看`;
+  $("summarySaveHint").textContent = `✅ 已保存到「${cat}」，去 ⑤ 存储管理按分类复看`;
   if (cat !== $("summaryCatFilter").value) return;
   loadSummaries();
 };
