@@ -37,7 +37,10 @@ Windows Live Captions (Win+Ctrl+L, high-quality on-device ASR)
    - **Windows Live Captions**: press `Win+Ctrl+L` and keep the window on
      screen (the bridge reads it). Best for English.
    - **Whisper large-v3 client** (best quality, custom vocabulary): start
-     playing the lecture audio first, then run in `E:\111\xuexi`:
+     playing the lecture audio first, then double-click
+     `E:\111\xuexi\start-listen.bat` (auto-starts/waits for WhisperLiveKit,
+     syncs the course glossary, pushes translations here). Equivalent manual
+     command from `E:\111\xuexi`:
      `python system_audio_client.py --sync-terms http://localhost:8000 --translate http://localhost:8000/api/captions`
    - **Browser speech** (fallback, e.g. Finnish): page section ③, pick the
      language and allow microphone access.
