@@ -708,9 +708,13 @@ def delete_session(sid: str):
 @app.delete("/api/captions-log")
 def clear_captions_log():
     log = DATA_DIR / "captions-log.jsonl"
+    freed = 0
+    lines = 0
     if log.is_file():
+        lines = sum(1 for _ in log.open(encoding="utf-8"))
+        freed = log.stat().st_size
         log.unlink()
-    return {"cleared": True}
+    return {"cleared": True, "log_lines": lines, "freed_bytes": freed}
 
 
 TEST_TITLES = {
