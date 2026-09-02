@@ -58,7 +58,8 @@ assert all(m in page for m in ["实时字幕", "字幕桥", "问 AI", "导出 Ma
                                "addCategoryBtn", "summaryList", "cleanTestBtn",
                                "diskWarn", "bridgeDetail", "reviewBtn", "quizBtn", "quizBox",
                                "loadHistoryBtn", "settingsModal", "cloudTranslate",
-                               "translateBackendHint", "verifyBtn", "uploadMaterial", "materialList"])
+                               "translateBackendHint", "verifyBtn", "uploadMaterial", "materialList",
+                               "audioBtn", "audioStop", "audioMode"])
 
 # --- real model paths ----------------------------------------------------
 assert post("/api/translate", {"text": "Our next lecture covers chapter five."})["text"]
@@ -72,6 +73,22 @@ ctx_zh = post("/api/translate", {"text": "The cell produces energy using its mit
                                  "context": "We discussed organelles. Mitochondria are the powerhouse."})["text"]
 assert "细胞" in ctx_zh and "线粒体" in ctx_zh, f"context-aware translation drifted: {ctx_zh!r}"
 expect(200, f"/api/sessions/{ctx_sid}", "DELETE")
+
+# --- independent audio channel: /api/audio transcribes PCM and feeds the
+# caption pipeline (translate + persist). Send a short 440 Hz tone (silence to
+# Whisper) to verify the endpoint shape; a 400 on garbage base64 guards input.
+import struct as _struct, base64 as _b64
+_tone = b"".join(
+    _struct.pack("<h", int(6000 * __import__("math").sin(2 * 3.14159 * 440 * (i / 16000))))
+    for i in range(16000 * 2))
+_r = post("/api/audio", {"pcm_b64": _b64.b64encode(_tone).decode(), "offset": 1.0})
+assert _r.get("translation") in (None, "") or isinstance(_r.get("translation"), str), _r
+assert isinstance(_r.get("language"), str), _r
+try:
+    post("/api/audio", {"pcm_b64": "%%%not-base64%%%", "offset": 0})
+    raise SystemExit("invalid base64 should 400")
+except urllib.error.HTTPError as e:
+    assert e.code == 400, e.code
 
 # --- captions pipeline: translate -> poll -> persist -> dup reject -------
 sid = post("/api/sessions", {"title": "Captions", "category": "Biology"})["id"]

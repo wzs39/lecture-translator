@@ -28,7 +28,8 @@ services:
       OLLAMA_MODEL: qwen3:4b-instruct
     volumes:
       - recordings:/srv/data
-    mem_limit: 512m
+      - asr-cache:/root/.cache/huggingface  # faster-whisper model downloaded once
+    mem_limit: 2g
     depends_on:
       - ollama
     restart: unless-stopped
@@ -36,3 +37,4 @@ services:
 volumes:
   ollama:
   recordings:
+  asr-cache:

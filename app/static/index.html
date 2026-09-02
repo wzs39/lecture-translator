@@ -123,6 +123,16 @@
       <span style="color:var(--dim);font-size:13px">麦克风补充输入：Windows 字幕漏掉的专有名词（人名/术语）会列出，可一键加入术语表，让翻译始终正确。</span>
       <div id="verifyBox" style="margin-top:8px;font-size:13px;color:var(--dim)"></div>
     </div>
+    <div class="row" style="margin-top:10px">
+      <button id="audioBtn">🎧 独立音频通道</button>
+      <button id="audioStop" class="ghost" disabled>■ 停止音频</button>
+      <select id="audioMode" title="音频来源">
+        <option value="tab">捕获：当前标签页音频（推荐，零串音）</option>
+        <option value="system">捕获：整个系统音频</option>
+        <option value="mic">捕获：麦克风</option>
+      </select>
+      <span style="color:var(--dim);font-size:13px">浏览器直接捕获讲座音频，容器内 Whisper 转写——与实时字幕完全独立，不受其他应用声音干扰。转写文本自动进入同一条翻译/保存管线。</span>
+    </div>
   </div>
 </div>
 
@@ -871,6 +881,88 @@ $("verifyBtn").onclick = () => {
   try { vRecog.start(); } catch (e) { setStatus("verify start failed: " + e.message); }
 };
 $("verifyStop").onclick = () => { vOn = false; if (vRecog) { try { vRecog.stop(); } catch {} } $("verifyBtn").disabled = false; $("verifyStop").disabled = true; setStatus("校验已停止"); };
+
+// ---- independent audio channel: capture the lecture tab/system audio (or
+// mic) with getDisplayMedia/getUserMedia, chunk it every 6 s, and POST 16 kHz
+// PCM to /api/audio where container-side faster-whisper transcribes it into
+// the same /api/captions pipeline. Fully independent of the captions bridge.
+let audioStream = null, audioCtx = null, audioProcessor = null, audioOn = false,
+    audioBuf = [], audioOffset0 = 0, audioSilent = 0;
+function downsampleTo16k(f32, fromRate) {
+  if (fromRate === 16000) return f32;
+  const ratio = fromRate / 16000, n = Math.floor(f32.length / ratio), out = new Float32Array(n);
+  for (let i = 0; i < n; i++) out[i] = f32[Math.floor(i * ratio)];
+  return out;
+}
+function floatTo16Le(f32) {
+  const out = new Int16Array(f32.length);
+  for (let i = 0; i < f32.length; i++) {
+    const s = Math.max(-1, Math.min(1, f32[i]));
+    out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+  }
+  return out;
+}
+function b64FromBytes(u8) {
+  let s = ""; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+async function submitAudioChunk() {
+  if (!audioBuf.length) return;
+  const merged = audioBuf; audioBuf = [];
+  const total = merged.reduce((a, b) => a + b.length, 0);
+  if (total < 16000) return;  // < 1 s of audio: skip (avoids garbage transcriptions)
+  const f32 = new Float32Array(total);
+  let o = 0; for (const c of merged) { f32.set(c, o); o += c.length; }
+  const i16 = floatTo16Le(downsampleTo16k(f32, audioCtx.sampleRate));
+  const pcm = new Uint8Array(i16.buffer);
+  const offset = (performance.now() - audioOffset0) / 1000;
+  const cap = Math.round(offset * 100) / 100;
+  try {
+    const r = await fetch("/api/audio", {method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({pcm_b64: b64FromBytes(pcm), offset: cap})});
+    if (!r.ok) { const e = await r.json().catch(()=>({detail:r.status})); setStatus("音频转写失败", String(e.detail||r.status)); return; }
+    const j = await r.json();
+    audioSilent = j.text ? 0 : audioSilent + 1;
+    if (!j.text && audioSilent >= 3) setStatus("音频通道运行中（未检测到语音）");
+    else if (j.text) setStatus("音频通道转写中", j.text.slice(-60));
+  } catch (e) { setStatus("音频通道断开", String(e)); }
+}
+async function startAudioChannel() {
+  const mode = $("audioMode").value;
+  try {
+    if (mode === "mic") audioStream = await navigator.mediaDevices.getUserMedia({audio: {echoCancellation:false, noiseSuppression:false}});
+    else {
+      audioStream = await navigator.mediaDevices.getDisplayMedia({audio: true, video: true});
+      audioStream.getVideoTracks().forEach(t => t.stop());  // audio only — drop the video track
+      if (!audioStream.getAudioTracks().length) { audioStream.getTracks().forEach(t=>t.stop()); return setStatus("未捕获到音频：分享时请勾选「分享标签页音频」"); }
+    }
+  } catch (e) { return setStatus("音频捕获被取消或被拒绝"); }
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  const src = audioCtx.createMediaStreamSource(audioStream);
+  audioProcessor = audioCtx.createScriptProcessor(4096, 1, 1);
+  audioBuf = []; audioOn = true; audioOffset0 = performance.now(); audioSilent = 0;
+  audioProcessor.onaudioprocess = (ev) => {
+    if (!audioOn) return;
+    audioBuf.push(new Float32Array(ev.inputBuffer.getChannelData(0)));
+    // ~6 s chunks at the context sample rate
+    const samples = audioBuf.reduce((a, b) => a + b.length, 0);
+    if (samples >= audioCtx.sampleRate * 6) submitAudioChunk();
+  };
+  src.connect(audioProcessor); audioProcessor.connect(audioCtx.destination);
+  $("audioBtn").disabled = true; $("audioStop").disabled = false;
+  setStatus("音频通道已开启", mode === "mic" ? "麦克风" : mode === "tab" ? "标签页音频" : "系统音频");
+}
+function stopAudioChannel() {
+  audioOn = false;
+  submitAudioChunk();  // flush the tail
+  if (audioProcessor) { try { audioProcessor.disconnect(); } catch {} audioProcessor = null; }
+  if (audioStream) { audioStream.getTracks().forEach(t => t.stop()); audioStream = null; }
+  if (audioCtx) { try { audioCtx.close(); } catch {} audioCtx = null; }
+  $("audioBtn").disabled = false; $("audioStop").disabled = true;
+  setStatus("音频通道已停止");
+}
+$("audioBtn").onclick = startAudioChannel;
+$("audioStop").onclick = stopAudioChannel;
 
 
 $("checkBtn").onclick = async () => { setStatus("checking..."); try { const r=await fetch("/api/self-check"); const h=await r.json(); setStatus(h.ready ? "ready" : "check failed", `ollama=${h.ollama} model=${h.model}`); } catch(e) { setStatus("backend unreachable"); } };

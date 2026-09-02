@@ -924,6 +924,66 @@ async def push_caption(req: CaptionReq):
     return line
 
 
+# ---- standalone audio channel: browser tab/system audio -> faster-whisper ----
+# Independent of the Windows Live Captions bridge: the browser captures the
+# lecture tab's (or system) audio with getDisplayMedia, sends 16 kHz mono PCM
+# chunks, and this endpoint transcribes them. Same /api/captions pipeline.
+_ASR = {"model": None}
+ASR_MODEL_SIZE = os.environ.get("ASR_MODEL_SIZE", "small")
+
+
+def _asr_model():
+    if _ASR["model"] is None:
+        from faster_whisper import WhisperModel
+        log.info("loading faster-whisper %s (cpu/int8) for the audio channel...", ASR_MODEL_SIZE)
+        _ASR["model"] = WhisperModel(ASR_MODEL_SIZE, device="cpu", compute_type="int8")
+    return _ASR["model"]
+
+
+def _pcm_wav_to_text(raw: bytes) -> tuple[str, str]:
+    """16 kHz mono 16-bit PCM little-endian -> (transcript, language)."""
+    import wave
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000); w.writeframes(raw)
+    buf.seek(0)
+    try:
+        segments, info = _asr_model().transcribe(buf, vad_filter=True)
+        return " ".join(s.text.strip() for s in segments).strip(), info.language
+    except ValueError as e:
+        if "max()" in str(e):  # VAD removed everything: silence, no speech
+            return "", ""
+        raise
+
+
+class AudioReq(BaseModel):
+    pcm_b64: str  # base64 of 16 kHz mono 16-bit LE PCM
+    offset: float = 0.0
+
+
+@app.post("/api/audio")
+async def transcribe_audio(req: AudioReq):
+    """Transcribe one audio chunk from the browser's independent audio channel."""
+    try:
+        raw = base64.b64decode(req.pcm_b64)
+    except Exception:
+        raise HTTPException(400, "pcm_b64 is not valid base64")
+    if not raw:
+        raise HTTPException(400, "empty audio chunk")
+    if len(raw) > 2_000_000:  # ~62 s of 16 kHz mono 16-bit
+        raise HTTPException(413, "audio chunk too large")
+    try:
+        text, lang = await asyncio.to_thread(_pcm_wav_to_text, raw)
+    except Exception as e:
+        log.warning("audio transcription failed: %s", e)
+        raise HTTPException(502, f"transcription failed: {e}")
+    if not text:
+        return {"text": "", "language": getattr(lang, "value", lang), "translation": None}
+    line = await push_caption(CaptionReq(text=text, offset=req.offset))
+    return {"text": text, "language": getattr(lang, "value", lang),
+            "translation": (line or {}).get("translation")}
+
+
 class VerifyReq(BaseModel):
     text: str  # one finalized mic chunk (what the user actually heard)
     baseline: str = ""  # optional caption text to compare against; defaults to recent CAPTIONS
