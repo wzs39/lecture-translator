@@ -832,7 +832,7 @@ async def translate_text(text: str, target: str, context: str = "") -> tuple[str
     try:
         model_out, model_backend = await asyncio.wait_for(model_task, timeout=AI_TRANSLATE_GRACE)
     except (asyncio.TimeoutError, asyncio.CancelledError):
-        model_task.cancel()
+        pass  # do NOT cancel: the task stays alive for the final retry below
     except Exception as e:
         log.warning("model translation failed: %s", e)
     # machine translation as the bounded-speed fallback / first coverage
@@ -859,13 +859,18 @@ async def translate_text(text: str, target: str, context: str = "") -> tuple[str
     if mt_text:
         cache_put(key, (mt_text, "machine"))
         return mt_text, "machine"
-    # both fell through: give the model one more unconstrained try
+    # both fell through: give the model one more unconstrained try. The task
+    # may still be running (never cancelled above). CancelledError must be
+    # caught too — it derives from BaseException, not Exception.
     try:
         out, backend = await asyncio.wait_for(model_task, timeout=60)
         if out:
             cache_put(key, (out, backend))
             return out, backend
+    except (asyncio.CancelledError, asyncio.TimeoutError):
+        model_task.cancel()
     except Exception as e:
+        model_task.cancel()
         log.warning("final model translation failed: %s", e)
     raise HTTPException(502, "translation backend unavailable")
 
