@@ -999,7 +999,7 @@ def _asr_model():
     return _ASR["model"]
 
 
-def _pcm_wav_to_text(raw: bytes) -> tuple[str, str]:
+def _pcm_wav_to_text(raw: bytes, language: str | None = None) -> tuple[str, str]:
     """16 kHz mono 16-bit PCM little-endian -> (transcript, language)."""
     import wave
     buf = io.BytesIO()
@@ -1007,7 +1007,8 @@ def _pcm_wav_to_text(raw: bytes) -> tuple[str, str]:
         w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000); w.writeframes(raw)
     buf.seek(0)
     try:
-        segments, info = _asr_model().transcribe(buf, vad_filter=True)
+        # language=None lets Whisper auto-detect per chunk; a fixed hint pins it.
+        segments, info = _asr_model().transcribe(buf, vad_filter=True, language=language)
         return " ".join(s.text.strip() for s in segments).strip(), info.language
     except ValueError as e:
         if "max()" in str(e):  # VAD removed everything: silence, no speech
@@ -1018,6 +1019,7 @@ def _pcm_wav_to_text(raw: bytes) -> tuple[str, str]:
 class AudioReq(BaseModel):
     pcm_b64: str  # base64 of 16 kHz mono 16-bit LE PCM
     offset: float = 0.0
+    language: str | None = None  # None = auto-detect (mixed-language audio safe)
 
 
 @app.post("/api/audio")
@@ -1032,7 +1034,8 @@ async def transcribe_audio(req: AudioReq):
     if len(raw) > 2_000_000:  # ~62 s of 16 kHz mono 16-bit
         raise HTTPException(413, "audio chunk too large")
     try:
-        text, lang = await asyncio.to_thread(_pcm_wav_to_text, raw)
+        text, lang = await asyncio.to_thread(
+            _pcm_wav_to_text, raw, req.language or None)
     except Exception as e:
         log.warning("audio transcription failed: %s", e)
         raise HTTPException(502, f"transcription failed: {e}")
