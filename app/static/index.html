@@ -318,6 +318,7 @@ function addAiCard(title, text) {
   $("aiOut").prepend(d);
   while ($("aiOut").children.length > 20) $("aiOut").lastChild.remove();
 }
+let aiHistory = [];  // {q, a} — drives the Markdown session export
 
 // Clear the caption stream AND the AI context. The AI (ask/terms/organize)
 // reads `original`, so a stale history would leak old lecture content into
@@ -389,7 +390,15 @@ async function askAI() {
   setStatus("asking AI...");
   const r = await fetch("/api/ask", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({question:$("question").value, context:ctx, target:"Chinese (Simplified)"})});
   const j = await r.json().catch(()=>({}));
-  if (r.ok) addAiCard("AI回答", j.text); else setStatus("AI 问答失败", await errText(r));
+  if (r.ok) {
+    addAiCard("AI回答", j.text);
+    aiHistory.push({q: $("question").value, a: j.text});
+    if (aiHistory.length > 100) aiHistory.shift();
+    // P1 context visibility: show what the prompt carried
+    if (j.prompt_chars != null)
+      setStatus("AI 回答完成", `送入 prompt ${j.prompt_chars} 字（字幕上下文 ${j.context_chars}）`);
+  }
+  else setStatus("AI 问答失败", await errText(r));
 }
 
 async function extractTerms() {
@@ -491,12 +500,22 @@ async function organize() {
 
 async function exportMarkdown() {
   let transcript = lines;
+  const meta = [];
   if (sessionId) { // prefer the persisted session transcript (has timestamps)
-    try { const s = await (await fetch(`/api/sessions/${sessionId}`)).json(); if (s.transcript.length) transcript = s.transcript; } catch {}
+    try {
+      const s = await (await fetch(`/api/sessions/${sessionId}`)).json();
+      if (s.transcript.length) transcript = s.transcript;
+      const mats = await (await fetch(`/api/sessions/${sessionId}/materials`)).json();
+      for (const m of (mats.materials || [])) meta.push(`- 📄 ${m.name}（${m.chars} 字）`);
+      if (s.glossary && Object.keys(s.glossary).length)
+        meta.push(`- 📖 术语表：${Object.entries(s.glossary).map(([k,v]) => `${k}=${v}`).join("、")}`);
+    } catch {}
   }
   const body = transcript.map(t => t.offset == null ? `- ${t.text}\n  ${t.zh ?? t.translation}` : `- [${fmtTs(t.offset)}] ${t.text}\n  ${t.zh ?? t.translation}`).join("\n");
   const notes = $("myNotes").value.trim();
-  const text = `# ${$("sessionTitle").value || "Lecture"}\n\n## 原文 / 翻译\n${body}` + (notes ? `\n\n## 我的笔记\n${notes}` : "");
+  const qa = aiHistory.length ? `\n\n## AI 问答\n${aiHistory.map(q => `**问：** ${q.q}\n\n${q.a}`).join("\n\n---\n\n")}` : "";
+  const metaMd = meta.length ? `\n\n## 课程资料\n${meta.join("\n")}` : "";
+  const text = `# ${$("sessionTitle").value || "Lecture"}\n\n## 原文 / 翻译\n${body}${metaMd}${qa}` + (notes ? `\n\n## 我的笔记\n${notes}` : "");
   const a=document.createElement("a"); a.href=URL.createObjectURL(new Blob([text],{type:"text/markdown"})); a.download="lecture-notes.md"; a.click(); URL.revokeObjectURL(a.href);
 }
 

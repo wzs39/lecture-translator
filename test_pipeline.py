@@ -203,24 +203,23 @@ assert get("/api/config")["ai_base"] == cfg0["ai_base"]
 # --- heartbeat, search, stats --------------------------------------------
 post("/api/bridge/heartbeat", {})
 assert get("/api/captions?since=0")["bridge_online"] is True
-# Converge: real bridge heartbeats concurrently, so re-send until observed
-for _ in range(10):
-    post("/api/bridge/heartbeat", {"disk_free_gb": 15.2})
-    if get("/api/captions?since=0")["disk_warn"] is True:
-        break
+# Converge: the real bridge heartbeats every second with healthy values, so a
+# single low-disk post can be overwritten between our post and our poll. Keep
+# posting 15.2 until the poll SEES it (bounded loop), then immediately assert.
+def converge_heartbeat(body, key, want):
+    for _ in range(40):
+        post("/api/bridge/heartbeat", body)
+        if get("/api/captions?since=0")[key] is want:
+            return
+    raise AssertionError(f"heartbeat convergence failed: {key} never became {want}")
+converge_heartbeat({"disk_free_gb": 15.2}, "disk_warn", True)
 assert get("/api/captions?since=0")["disk_warn"] is True
-for _ in range(10):
-    post("/api/bridge/heartbeat", {"disk_free_gb": 500})
-    if get("/api/captions?since=0")["disk_warn"] is False:
-        break
+converge_heartbeat({"disk_free_gb": 500}, "disk_warn", False)
 assert get("/api/captions?since=0")["disk_warn"] is False
 # The real host bridge heartbeats concurrently with the test; re-post until
 # the poll observes the waiting state we just sent (converges in one round).
-for _ in range(10):
-    post("/api/bridge/heartbeat", {"disk_free_gb": 500, "window_found": False, "error": "test error"})
-    pvp = get("/api/captions?since=0")
-    if pvp["bridge_window"] is False:
-        break
+converge_heartbeat({"disk_free_gb": 500, "window_found": False, "error": "test error"}, "bridge_window", False)
+pvp = get("/api/captions?since=0")
 assert pvp["bridge_online"] is True, "waiting for the window must still count as alive"
 assert pvp["bridge_window"] is False and pvp["bridge_error"] == "test error"
 for _ in range(10):

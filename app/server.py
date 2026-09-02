@@ -130,7 +130,6 @@ class AskReq(BaseModel):
     context: str
     target: str = "Chinese (Simplified)"
 
-
 class SessionReq(BaseModel):
     title: str = "Untitled lecture"
     language: str = "auto"
@@ -607,7 +606,10 @@ async def ask(req: AskReq):
         + _glossary_block() + _materials_block(req.question))
     try:
         text, backend = await ai_complete(prompt)
-        return {"text": text, "model": backend}
+        # context_chars = what the client sees; the full prompt also carries
+        # glossary + material text — report both so prompt size is debuggable
+        return {"text": text, "model": backend, "context_chars": len(context),
+                "prompt_chars": len(prompt)}
     except Exception as e:
         raise HTTPException(502, f"question backend: {e}")
 
