@@ -20,6 +20,12 @@
                   border-radius:8px; padding:8px 10px; font-size:14px; }
   #status { color:var(--dim); font-size:13px; }
   #apiUrl { min-width:280px; }
+  .tabs { display:flex; gap:6px; margin-bottom:0; }
+  .tab { background:#1b2735; color:var(--dim); border-radius:8px 8px 0 0; padding:8px 14px; font-size:13px; font-weight:600; }
+  .tab.active { background:var(--acc); color:#04121f; }
+  .tabpanel { border:1px solid #1e2c40; border-radius:0 10px 10px 10px; padding:10px 12px; background:#0d1520; }
+  details.section summary { cursor:pointer; list-style:revert; }
+  details.section summary:hover { color:var(--acc); }
   .cols { display:flex; gap:14px; align-items:stretch; max-width:1400px; margin-bottom:14px; }
   .col { flex:1; min-width:0; display:flex; }
   .panel { flex:1; background:#0f1722; border:1px solid #1e2c40; border-radius:12px; padding:14px 16px; }
@@ -32,15 +38,13 @@
   .line .orig { color:var(--dim); font-size:13px; margin-bottom:2px; }
   .line .zh { font-size:17px; }
   .line.ai { border-left-color:#b78bff; }
-  #hud { position:fixed; right:18px; top:18px; color:var(--dim); font-size:12px;
-         background:rgba(8,14,22,.85); border:1px solid #22344d; border-radius:10px; padding:8px 12px; }
 </style>
 </head>
 <body>
 <h1>Lecture Translator
   <button id="settingsBtn" class="ghost" style="font-size:13px;padding:6px 14px;vertical-align:middle">⚙ 设置</button>
 </h1>
-<div class="sub">Windows 实时字幕（高质量识别）→ 本地 AI 翻译 → 课堂笔记。翻译与整理在 Docker 容器内，识别用 Windows 自带字幕。</div>
+<div class="sub">识别 → AI 翻译 → 课程笔记 · 支持英语 / 芬兰语 / 中文 · 全部本地 Docker 运行</div>
 <div id="diskWarn" style="display:none;background:#7f1d1d;color:#ffd7d7;padding:7px 12px;border-radius:8px;margin-bottom:10px;font-size:13px">⚠️ D 盘剩余空间不足 <b>20GB</b>（当前 <span id="diskFreeText"></span> GB）——Docker 数据盘会把 D 盘写满，请立即清理磁盘或导出课程后释放空间。</div>
 
 <!-- settings dialog: keeps the main page clean; opened via ⚙ 设置 -->
@@ -86,53 +90,65 @@
         <button id="newSession" class="ghost">新建课程</button>
         <span id="sessionLabel" style="color:var(--dim)">未创建</span>
       </div>
-      <div class="row" style="margin-top:8px">
-        <input id="materialFile" type="file" accept=".pdf,.docx,.pptx,.txt,.md" style="color:var(--dim);font-size:13px">
-        <button id="uploadMaterial" class="ghost">上传讲义（PDF/Word/PPT）</button>
-        <span id="materialHint" style="color:var(--dim);font-size:12px">AI 据此纠错并补充翻译</span>
-      </div>
-      <div id="materialList" style="font-size:12px;color:var(--dim);margin-top:4px"></div>
+      <details style="margin-top:8px">
+        <summary style="font-size:13px;color:var(--dim);cursor:pointer">📄 课程讲义（可选，AI 据此纠错并补充翻译）</summary>
+        <div class="row" style="margin-top:8px">
+          <input id="materialFile" type="file" accept=".pdf,.docx,.pptx,.txt,.md" style="color:var(--dim);font-size:13px">
+          <button id="uploadMaterial" class="ghost">上传讲义</button>
+        </div>
+        <div id="materialList" style="font-size:12px;color:var(--dim);margin-top:4px"></div>
+      </details>
     </div>
     <div>
-      <div class="step">② 服务状态</div>
+      <div class="step">② 状态</div>
       <div class="row">
-    <span id="status">idle</span>
-    <span id="translateBackendHint" style="color:var(--dim);font-size:12px"></span>
-    <span id="bridgeLamp" style="color:var(--dim);font-size:13px">● 桥状态未知</span>
-    <span id="bridgeDetail" style="color:var(--dim);font-size:12px"></span>
-    <button id="checkBtn" class="ghost">检查服务</button>
+        <span id="status">idle</span>
+        <span id="bridgeLamp" style="color:var(--dim);font-size:13px">● 桥状态未知</span>
+        <span id="bridgeDetail" style="color:var(--dim);font-size:12px"></span>
       </div>
     </div>
   </div>
   <div style="margin-top:12px">
-    <div class="step">③ 文字来源：英语用 Windows 实时字幕；芬兰语用浏览器语音识别（实时字幕不支持芬兰语）</div>
-    <div class="row">
-      <button id="captionBtn" class="ghost">打开实时字幕 (Win+Ctrl+L)</button>
-      <span style="color:var(--dim);font-size:13px">英语讲座：保持字幕窗口可见，双击 <b>start-captions.bat</b> 启动字幕桥。</span>
+    <div class="step">③ 文字来源（选一个）</div>
+    <div class="tabs">
+      <button class="tab" data-src="captions">方式 A · Windows 实时字幕</button>
+      <button class="tab" data-src="audio">方式 B · 标签页音频</button>
+      <button class="tab" data-src="mic">方式 C · 麦克风</button>
     </div>
-    <div class="row" style="margin-top:10px">
-      <select id="speechLang" title="浏览器语音识别语言">
-        <option value="fi-FI">语音识别：芬兰语</option>
-        <option value="en-US">语音识别：英语</option>
-        <option value="sv-SE">语音识别：瑞典语</option>
-        <option value="zh-CN">语音识别：中文</option>
-      </select>
-      <button id="speechBtn">🎤 浏览器语音识别（芬兰语等）</button>
-      <button id="speechStop" class="ghost" disabled>■ 停止识别</button>
-      <button id="verifyBtn" class="ghost">🔍 校验专有名词</button>
-      <button id="verifyStop" class="ghost" disabled>■ 停止校验</button>
-      <span style="color:var(--dim);font-size:13px">麦克风补充输入：Windows 字幕漏掉的专有名词（人名/术语）会列出，可一键加入术语表，让翻译始终正确。</span>
+    <div class="tabpanel" id="src-captions">
+      <div class="row">
+        <button id="captionBtn" class="ghost">打开实时字幕 (Win+Ctrl+L)</button>
+        <span style="color:var(--dim);font-size:13px">英语讲座首选：保持字幕窗口可见，桥自动读取并翻译。</span>
+      </div>
+    </div>
+    <div class="tabpanel" id="src-audio" style="display:none">
+      <div class="row">
+        <button id="audioBtn">🎧 开始捕获</button>
+        <button id="audioStop" class="ghost" disabled>■ 停止音频</button>
+        <select id="audioMode" title="音频来源">
+          <option value="tab">捕获：当前标签页音频（推荐，零串音）</option>
+          <option value="system">捕获：整个系统音频</option>
+        </select>
+        <span style="color:var(--dim);font-size:13px">直接捕获讲座标签页声音，容器内 Whisper 转写，不受其他应用声音干扰。</span>
+      </div>
+    </div>
+    <div class="tabpanel" id="src-mic" style="display:none">
+      <div class="row">
+        <select id="speechLang" title="语音识别语言">
+          <option value="fi-FI">语言：芬兰语</option>
+          <option value="en-US">语言：英语</option>
+          <option value="sv-SE">语言：瑞典语</option>
+          <option value="zh-CN">语言：中文</option>
+        </select>
+        <button id="speechBtn">🎤 开始收音</button>
+        <button id="speechStop" class="ghost" disabled>■ 停止收音</button>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button id="verifyBtn" class="ghost">🔍 校验专有名词</button>
+        <button id="verifyStop" class="ghost" disabled>■ 停止校验</button>
+        <span style="color:var(--dim);font-size:13px">说一句话，找出字幕漏掉的专有名词，一键加入术语表。</span>
+      </div>
       <div id="verifyBox" style="margin-top:8px;font-size:13px;color:var(--dim)"></div>
-    </div>
-    <div class="row" style="margin-top:10px">
-      <button id="audioBtn">🎧 独立音频通道</button>
-      <button id="audioStop" class="ghost" disabled>■ 停止音频</button>
-      <select id="audioMode" title="音频来源">
-        <option value="tab">捕获：当前标签页音频（推荐，零串音）</option>
-        <option value="system">捕获：整个系统音频</option>
-        <option value="mic">捕获：麦克风</option>
-      </select>
-      <span style="color:var(--dim);font-size:13px">浏览器直接捕获讲座音频，容器内 Whisper 转写——与实时字幕完全独立，不受其他应用声音干扰。转写文本自动进入同一条翻译/保存管线。</span>
     </div>
   </div>
 </div>
@@ -154,19 +170,17 @@
   </div>
   <div class="col">
     <div class="panel">
-      <div class="step">课堂 AI 问答与笔记（AI 只读「清空字幕流」之后的字幕）</div>
+      <div class="step">④ 课堂 AI 问答与笔记（AI 只读「清空字幕流」之后的字幕）</div>
       <div class="row">
         <input id="question" placeholder="问这节课的问题" style="flex:1;min-width:160px">
         <button id="askBtn" class="ghost">问 AI</button>
-      </div>
-      <div class="row" style="margin-top:8px">
         <button id="termsBtn" class="ghost">提取术语</button>
         <button id="organizeBtn" class="ghost">✨ AI整理（保留原文）</button>
-        <button id="exportBtn" class="ghost">导出 Markdown</button>
       </div>
       <div class="row" style="margin-top:6px">
         <select id="summaryCategory"><option value="未分类">未分类</option></select>
         <button id="saveSummaryBtn" class="ghost">💾 保存总结到分类</button>
+        <button id="exportBtn" class="ghost">导出 Markdown</button>
         <span id="summarySaveHint" style="color:var(--dim);font-size:12px">点 AI 整理后，再把总结存入某个分类</span>
       </div>
       <textarea id="myNotes" placeholder="我的笔记（自己随手记，AI 不会覆盖；随课程保存）"
@@ -176,36 +190,42 @@
         <span id="notesHint" style="color:var(--dim);font-size:12px"></span>
       </div>
       <div id="aiOut"></div>
-      <div class="step" style="margin-top:14px">课程术语表（翻译/问答自动采用，保证前后一致）</div>
-      <div id="glossaryList" style="font-size:13px"></div>
-      <div class="row" style="margin-top:6px">
-        <input id="gTerm" placeholder="术语，如 Mitokondrio" style="min-width:170px">
-        <input id="gZh" placeholder="译名/解释，如 线粒体" style="min-width:150px">
-        <button id="gAdd" class="ghost">添加</button>
-        <button id="ankiBtn" class="ghost">导出 Anki CSV</button>
-      </div>
+      <details style="margin-top:12px">
+        <summary class="step" style="margin-bottom:6px">课程术语表（翻译/问答自动采用，保证前后一致）</summary>
+        <div id="glossaryList" style="font-size:13px"></div>
+        <div class="row" style="margin-top:6px">
+          <input id="gTerm" placeholder="术语，如 Mitokondrio" style="min-width:170px">
+          <input id="gZh" placeholder="译名/解释，如 线粒体" style="min-width:150px">
+          <button id="gAdd" class="ghost">添加</button>
+          <button id="ankiBtn" class="ghost">导出 Anki CSV</button>
+        </div>
+      </details>
     </div>
   </div>
 </div>
 
-<div class="section">
-  <div class="step">⑤ 存储管理（课程归档与复看）</div>
-  <div class="row">
+<details class="section">
+  <summary>
+    <div class="step" style="display:inline">⑤ 存储管理 · 复习工具（课程归档 / AI 总结 / 自测 / 搜索）</div>
+    <span id="storageSummary" style="color:var(--dim);font-size:12px;margin-left:8px"></span>
+  </summary>
+  <div class="row" style="margin-top:10px">
     <select id="categoryFilter"><option value="">全部分类</option></select>
     <label><input id="showArchived" type="checkbox"> 显示已归档</label>
     <button id="storageRefresh" class="ghost">刷新占用</button>
     <button id="clearLog" class="ghost">清空字幕日志</button>
     <button id="cleanTestBtn" class="ghost">清理测试数据</button>
-    <span id="storageSummary" style="color:var(--dim);font-size:13px"></span>
   </div>
   <div id="storageList" style="margin-top:8px;font-size:13px"></div>
+  <details style="margin-top:10px">
+    <summary style="font-size:13px;color:var(--dim);cursor:pointer">分类管理</summary>
+    <div class="row" style="margin-top:8px">
+      <input id="newCategory" placeholder="新分类名，如：期末复习" style="min-width:140px">
+      <button id="addCategoryBtn" class="ghost">新建分类</button>
+      <span id="categoryList" style="font-size:12px"></span>
+    </div>
+  </details>
   <div class="row" style="margin-top:10px">
-    <b style="font-size:13px">分类管理：</b>
-    <input id="newCategory" placeholder="新分类名，如：期末复习" style="min-width:140px">
-    <button id="addCategoryBtn" class="ghost">新建分类</button>
-    <span id="categoryList" style="font-size:12px"></span>
-  </div>
-  <div class="row" style="margin-top:8px">
     <b style="font-size:13px">AI 总结：</b>
     <select id="summaryCatFilter"><option value="">全部总结</option></select>
     <button id="summaryRefresh" class="ghost">刷新</button>
@@ -221,9 +241,7 @@
   </div>
   <div id="searchResults" style="margin-top:8px;font-size:13px"></div>
   <div id="statsTable" style="margin-top:8px;font-size:13px"></div>
-</div>
-
-<div id="hud"></div>
+</details>
 
 <script>
 const $ = id => document.getElementById(id);
@@ -957,8 +975,15 @@ function stopAudioChannel() {
 $("audioBtn").onclick = startAudioChannel;
 $("audioStop").onclick = stopAudioChannel;
 
+// source tabs: switching only shows/hides the matching controls — sources
+// themselves start/stop via their own buttons, so a tab click never changes
+// what is currently capturing
+document.querySelectorAll(".tab[data-src]").forEach(tab => tab.onclick = () => {
+  document.querySelectorAll(".tab[data-src]").forEach(t => t.classList.toggle("active", t === tab));
+  document.querySelectorAll(".tabpanel").forEach(p => p.style.display = p.id === "src-" + tab.dataset.src ? "block" : "none");
+});
+document.querySelector('.tab[data-src="captions"]').classList.add("active");
 
-$("checkBtn").onclick = async () => { setStatus("checking..."); try { const r=await fetch("/api/self-check"); const h=await r.json(); setStatus(h.ready ? "ready" : "check failed", `ollama=${h.ollama} model=${h.model}`); } catch(e) { setStatus("backend unreachable"); } };
 loadConfig();
 loadStorage();
 fetch("/api/self-check").then(r=>r.json()).then(h=>setStatus(h.ready ? "ready" : "check failed", `ollama=${h.ollama} model=${h.model}`))
