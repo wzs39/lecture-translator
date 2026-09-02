@@ -28,15 +28,28 @@ Windows Live Captions (Win+Ctrl+L, high-quality on-device ASR)
 
 ## Run on Windows (manual)
 
-1. Start Docker Desktop, then double-click `start.bat` → opens
-   `http://localhost:8000`.
-2. Open Live Captions: `Win+Ctrl+L` (keep the window visible on screen).
-3. Double-click `start-captions.bat` — first run creates an isolated Python
-   venv in `bridge/.venv` (only host-side install; it reads caption text via
-   UI Automation, which must run outside Docker).
-4. Captured sentences appear as subtitles and are saved into the active
-   course session automatically.
-5. To stop: close the bridge window, then `stop.bat`.
+**Start (per lecture):**
+
+1. Start Docker Desktop, then double-click `start.bat`. It brings up the
+   stack, wakes the WhisperLiveKit container if it was stopped, launches the
+   caption bridge minimized, and opens `http://localhost:8000`.
+2. Pick **one** caption source:
+   - **Windows Live Captions**: press `Win+Ctrl+L` and keep the window on
+     screen (the bridge reads it). Best for English.
+   - **Whisper large-v3 client** (best quality, custom vocabulary): start
+     playing the lecture audio first, then run in `E:\111\xuexi`:
+     `python system_audio_client.py --sync-terms http://localhost:8000 --translate http://localhost:8000/api/captions`
+   - **Browser speech** (fallback, e.g. Finnish): page section ③, pick the
+     language and allow microphone access.
+3. Captured sentences appear as bilingual subtitles and are saved into the
+   active course session automatically.
+
+**Stop (after class):**
+
+Double-click `stop.bat`. It kills the caption bridge and stops all AI
+containers (translator, Ollama, WhisperLiveKit) — the GPU/RAM the models
+hold (~4 GB VRAM) is freed; closing the browser tab alone does NOT do this.
+Next `start.bat` reloads the large-v3 model in about 1 minute.
 
 ## Features
 
