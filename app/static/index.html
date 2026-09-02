@@ -85,6 +85,12 @@
         <button id="newSession" class="ghost">新建课程</button>
         <span id="sessionLabel" style="color:var(--dim)">未创建</span>
       </div>
+      <div class="row" style="margin-top:8px">
+        <input id="materialFile" type="file" accept=".pdf,.docx,.pptx,.txt,.md" style="color:var(--dim);font-size:13px">
+        <button id="uploadMaterial" class="ghost">上传讲义（PDF/Word/PPT）</button>
+        <span id="materialHint" style="color:var(--dim);font-size:12px">AI 据此纠错并补充翻译</span>
+      </div>
+      <div id="materialList" style="font-size:12px;color:var(--dim);margin-top:4px"></div>
     </div>
     <div>
       <div class="step">② 服务状态</div>
@@ -318,6 +324,7 @@ async function createSession() {
   await fetch(`/api/sessions/${sessionId}/activate`, {method:"POST"});
   $("myNotes").value = "";
   loadGlossary();
+  loadMaterials();
   setStatus("course ready", "captions will be saved into this session");
 }
 
@@ -361,6 +368,39 @@ $("gAdd").onclick = async () => {
     body: JSON.stringify({term:$("gTerm").value, zh:$("gZh").value})});
   $("gTerm").value = ""; $("gZh").value = "";
   loadGlossary();
+};
+
+// ---- course materials: upload lecture files the AI uses to correct/supplement ----
+async function loadMaterials() {
+  const list = $("materialList");
+  if (!sessionId) { list.innerHTML = ""; return; }
+  try {
+    const j = await (await fetch(`/api/sessions/${sessionId}/materials`)).json();
+    list.innerHTML = (j.materials || []).length
+      ? j.materials.map(m => `<span style="margin-right:10px">📄 ${escapeHtml(m.name)} (${m.chars}字) <a href="#" data-mdel="${escapeHtml(m.name)}" style="color:var(--acc)">删除</a></span>`).join("")
+      : "<span style='color:var(--dim)'>未上传讲义 — 翻译仅凭字幕</span>";
+    list.querySelectorAll("[data-mdel]").forEach(a => a.onclick = async (e) => {
+      e.preventDefault();
+      await fetch(`/api/sessions/${sessionId}/materials?name=${encodeURIComponent(a.dataset.mdel)}`, {method:"DELETE"});
+      loadMaterials();
+      setStatus("讲义已删除", "AI 将不再据此纠错");
+    });
+  } catch { list.innerHTML = ""; }
+}
+$("uploadMaterial").onclick = async () => {
+  if (!sessionId) return setStatus("请先新建课程，再上传讲义");
+  const f = $("materialFile").files[0];
+  if (!f) return setStatus("请选一个 PDF / Word / PPT / 文本文件");
+  setStatus("上传讲义中...", f.name);
+  const buf = await f.arrayBuffer();
+  const b64 = btoa(String.fromCharCode(...new Uint8Array(buf)));
+  const r = await fetch(`/api/sessions/${sessionId}/materials`, {method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({name: f.name, content_b64: b64})});
+  const j = await r.json();
+  if (!r.ok) return setStatus("上传失败", j.detail || `HTTP ${r.status}`);
+  $("materialFile").value = "";
+  loadMaterials();
+  setStatus("讲义已上传", "AI 将据此纠错并补充翻译");
 };
 
 let lastOrganizeText = "";
@@ -713,6 +753,7 @@ async function switchSession(sid, title) {
     lines = s.transcript.map(t => ({orig: t.text, zh: t.translation, offset: t.offset}));
     const n = s.notes; $("myNotes").value = Array.isArray(n) ? "" : (n || "");
     loadGlossary();
+    loadMaterials();
     pollSince = null; // resync the caption cursor so nothing old is re-rendered
     try { const b = await (await fetch("/api/captions?since=0")).json(); pollSince = b.next; } catch {}
     loadStorage();
