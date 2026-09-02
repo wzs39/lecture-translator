@@ -31,6 +31,10 @@ exit /b 1
 echo Lecture Translator is ready: http://localhost:8000
 start "" http://localhost:8000
 
+rem Wake the WhisperLiveKit container if it was stopped by stop.bat
+rem (start is instant if it is already running; large-v3 needs ~1 min to load)
+docker start whisperlivekit >nul 2>&1
+
 rem Also launch the Live Captions bridge in a minimized window (if set up)
 if exist "%~dp0bridge\.venv\Scripts\python.exe" (
   start "LectureTranslator-Bridge" /min cmd /c "%~dp0start-captions.bat"
