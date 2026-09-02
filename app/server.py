@@ -363,6 +363,12 @@ def _translation_system() -> str:
     prefix = f"This lecture is about: {topic}. " if topic else "This is a university lecture. "
     if g:
         prefix += "Use the course glossary for these terms. "
+    prefix += (
+        "The input may contain speech-recognition noise: stray background speech, "
+        "audio from other apps, or broken fragments. Translate ONLY what the input "
+        "actually says — never infer or invent content that is not there. If the "
+        "input is a meaningless fragment, output a literal minimal rendering."
+    )
     return prefix
 
 
