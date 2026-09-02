@@ -492,9 +492,13 @@ def add_material(sid: str, req: MaterialReq):
 
 
 @app.get("/api/sessions/{sid}/materials")
-def list_materials(sid: str):
+def list_materials(sid: str, text: int = 0):
     _session_path(sid)
-    return {"materials": [{"name": m["name"], "chars": m["chars"]} for m in _load_materials(sid)]}
+    mats = _load_materials(sid)
+    if text:
+        # full stored text, for the on-page material viewer
+        return {"materials": [{"name": m["name"], "chars": m["chars"], "text": m.get("text", "")} for m in mats]}
+    return {"materials": [{"name": m["name"], "chars": m["chars"]} for m in mats]}
 
 
 @app.delete("/api/sessions/{sid}/materials")

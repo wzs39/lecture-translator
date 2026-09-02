@@ -406,8 +406,25 @@ async function loadMaterials() {
   try {
     const j = await (await fetch(`/api/sessions/${sessionId}/materials`)).json();
     list.innerHTML = (j.materials || []).length
-      ? j.materials.map(m => `<span style="margin-right:10px">📄 ${escapeHtml(m.name)} (${m.chars}字) <a href="#" data-mdel="${escapeHtml(m.name)}" style="color:var(--acc)">删除</a></span>`).join("")
-      : "<span style='color:var(--dim)'>未上传讲义 — 翻译仅凭字幕</span>";
+      ? j.materials.map(m => `<span class="mat" style="display:inline-block">📄 ${escapeHtml(m.name)} (${m.chars}字) <a href="#" data-mview="${escapeHtml(m.name)}" style="color:var(--acc)">查看</a> <a href="#" data-mdel="${escapeHtml(m.name)}" style="color:var(--acc)">删除</a></span>`).join(" ")
+      : "<span style='color:var(--dim)'>未上传讲义 — AI 仅凭字幕回答，上传后可据此纠错并补充</span>";
+    list.querySelectorAll("[data-mview]").forEach(a => a.onclick = async (e) => {
+      e.preventDefault();
+      const name = a.dataset.mview;
+      const box = list.querySelector(`[data-mat="${name}"]`);
+      if (box) { box.remove(); return; }
+      let text = "加载中…";
+      try {
+        const d = await (await fetch(`/api/sessions/${sessionId}/materials?text=1`)).json();
+        const m = (d.materials || []).find(x => x.name === name);
+        text = m && m.text ? m.text : "(无可读文本)";
+      } catch { text = "加载失败"; }
+      const pre = document.createElement("div");
+      pre.dataset.mat = name;
+      pre.style.cssText = "white-space:pre-wrap;max-height:46vh;overflow:auto;margin:6px 0;padding:8px;background:var(--bg);border:1px solid #22344d;border-radius:8px;font-size:12px;color:var(--dim)";
+      pre.textContent = text;
+      a.closest(".mat").after(pre);
+    });
     list.querySelectorAll("[data-mdel]").forEach(a => a.onclick = async (e) => {
       e.preventDefault();
       await fetch(`/api/sessions/${sessionId}/materials?name=${encodeURIComponent(a.dataset.mdel)}`, {method:"DELETE"});
