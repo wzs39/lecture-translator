@@ -48,7 +48,7 @@ def post(p, b=None, method="POST"): return call(p, method, b)[1]
 health = get("/api/self-check")
 assert health["ready"], health
 limits = health["memory"]
-assert limits["live_caption_limit"] == 500 and limits["translation_cache_limit"] == 500
+assert limits["live_caption_limit"] >= 1000 and limits["translation_cache_limit"] >= 1000
 
 # --- page ----------------------------------------------------------------
 page = urllib.request.urlopen(HOST + "/").read().decode()
@@ -56,7 +56,8 @@ assert all(m in page for m in ["实时字幕", "字幕桥", "问 AI", "导出 Ma
                                "saveDoc", "ankiBtn", "statsBtn", "本地 Ollama",
                                "分类管理", "AI 总结", "saveSummaryBtn",
                                "addCategoryBtn", "summaryList", "cleanTestBtn",
-                               "diskWarn", "bridgeDetail", "reviewBtn", "quizBtn", "quizBox"])
+                               "diskWarn", "bridgeDetail", "reviewBtn", "quizBtn", "quizBox",
+                               "loadHistoryBtn"])
 
 # --- real model paths ----------------------------------------------------
 assert post("/api/translate", {"text": "Our next lecture covers chapter five."})["text"]
@@ -139,9 +140,16 @@ mock.shutdown()
 # --- heartbeat, search, stats --------------------------------------------
 post("/api/bridge/heartbeat", {})
 assert get("/api/captions?since=0")["bridge_online"] is True
-post("/api/bridge/heartbeat", {"disk_free_gb": 15.2})
+# Converge: real bridge heartbeats concurrently, so re-send until observed
+for _ in range(10):
+    post("/api/bridge/heartbeat", {"disk_free_gb": 15.2})
+    if get("/api/captions?since=0")["disk_warn"] is True:
+        break
 assert get("/api/captions?since=0")["disk_warn"] is True
-post("/api/bridge/heartbeat", {"disk_free_gb": 500})
+for _ in range(10):
+    post("/api/bridge/heartbeat", {"disk_free_gb": 500})
+    if get("/api/captions?since=0")["disk_warn"] is False:
+        break
 assert get("/api/captions?since=0")["disk_warn"] is False
 # The real host bridge heartbeats concurrently with the test; re-post until
 # the poll observes the waiting state we just sent (converges in one round).

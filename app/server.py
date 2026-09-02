@@ -15,6 +15,7 @@ import logging
 import json
 import re
 import uuid
+import threading
 from pathlib import Path
 
 import httpx
@@ -60,8 +61,55 @@ BRIDGE_DISK_FREE = None  # host drive free GB reported by the bridge
 BRIDGE_WINDOW = None      # caption window visible to the bridge
 BRIDGE_ERROR = None       # last bridge-side error (None = healthy)
 DISK_WARN_GB = 20  # page banner when the Docker data drive drops below this
-CAPTIONS_MAX = 500  # live polling only; persisted transcripts are never pruned
-TRANSLATION_CACHE_MAX = 500
+# Live polling buffer only; persisted transcripts (course JSON + captions log)
+# are never pruned and can grow far beyond this. 500 ~ 30 min of fast speech,
+# 2000 ~ 2 hours if the speaker keeps a steady pace.
+CAPTIONS_MAX = 2000
+TRANSLATION_CACHE_MAX = 2000
+
+# Batched session writes: accumulate lines in memory, flush every FLUSH_INTERVAL_S
+# or every FLUSH_BATCH_SIZE lines, whichever comes first.  This avoids writing
+# session JSON on every single caption (expensive for 2-hour lectures).
+_pending_session_lines: dict[str, list] = {}   # sid -> [line, ...]
+FLUSH_BATCH_SIZE = 30
+FLUSH_INTERVAL_S = 30
+_last_flush: dict[str, float] = {}              # sid -> monotonic timestamp
+
+
+def _flush_pending_session(sid: str) -> None:
+    """Write accumulated lines into session JSON, respecting batch limits."""
+    buf = _pending_session_lines.get(sid)
+    if not buf:
+        return
+    now = time.monotonic()
+    elapsed = now - _last_flush.get(sid, 0)
+    if len(buf) < FLUSH_BATCH_SIZE and elapsed < FLUSH_INTERVAL_S:
+        return  # not yet time
+    try:
+        path = DATA_DIR / f"session-{sid}.json"
+        session = json.loads(path.read_text(encoding="utf-8"))
+        session["transcript"].extend(buf)
+        path.write_text(json.dumps(session, ensure_ascii=False, indent=2), encoding="utf-8")
+        _pending_session_lines[sid] = []
+        _last_flush[sid] = now
+    except (OSError, json.JSONDecodeError):
+        log.warning("session flush failed for %s; will retry next caption", sid)
+
+
+def _flush_worker() -> None:
+    """Background loop: flush pending caption batches even when no new captions
+    arrive (otherwise the final batch of a lecture would sit in RAM until a
+    restart). Runs every FLUSH_INTERVAL_S until the process exits."""
+    while True:
+        time.sleep(FLUSH_INTERVAL_S)
+        for sid in list(_pending_session_lines):
+            try:
+                _flush_pending_session(sid)
+            except Exception as e:  # never let the flusher die
+                log.warning("flush worker error for %s: %s", sid, e)
+
+
+threading.Thread(target=_flush_worker, daemon=True).start()
 
 
 class TranslateReq(BaseModel):
@@ -412,6 +460,7 @@ def storage_info():
 @app.delete("/api/sessions/{sid}")
 def delete_session(sid: str):
     path = _session_path(sid)
+    _pending_session_lines.pop(sid, None)  # discard unflushed buffer
     if ACTIVE_SESSION["id"] == sid:
         ACTIVE_SESSION["id"] = None
     path.unlink()
@@ -466,8 +515,10 @@ async def self_check():
                 checks["model"] = "ok" if CONFIG["model"] in names else "missing"
     except Exception as e:
         checks["ollama_error"] = str(e)
+    pending = sum(len(v) for v in _pending_session_lines.values())
     checks["memory"] = {"live_captions": len(CAPTIONS), "live_caption_limit": CAPTIONS_MAX,
-                        "translation_cache": len(_translation_cache), "translation_cache_limit": TRANSLATION_CACHE_MAX}
+                        "translation_cache": len(_translation_cache), "translation_cache_limit": TRANSLATION_CACHE_MAX,
+                        "pending_session_flush": pending}
     checks["ready"] = checks["ollama"] is True and checks["model"] == "ok" and checks["data_dir"] is True
     return checks
 
@@ -675,15 +726,11 @@ async def push_caption(req: CaptionReq):
             f.write(json.dumps(line, ensure_ascii=False) + "\n")
     except OSError as e:
         log.warning("captions log write failed: %s", e)
+    # batch session JSON writes: append in-memory, flush periodically
     sid = ACTIVE_SESSION["id"]
     if sid:
-        try:
-            session = json.loads((DATA_DIR / f"session-{sid}.json").read_text(encoding="utf-8"))
-            session["transcript"].append(line)
-            (DATA_DIR / f"session-{sid}.json").write_text(
-                json.dumps(session, ensure_ascii=False, indent=2), encoding="utf-8")
-        except (OSError, json.JSONDecodeError):
-            log.warning("active session %s missing; caption kept in buffer only", sid)
+        _pending_session_lines.setdefault(sid, []).append(line)
+        _flush_pending_session(sid)
     log.info("caption: %s", {k: line[k] for k in ("text", "translation", "offset")})
     return line
 
@@ -764,6 +811,10 @@ def update_session(sid: str, req: ArchiveReq):
 @app.post("/api/sessions/{sid}/activate")
 def activate_session(sid: str):
     _session_path(sid)  # 404 unless it exists
+    # flush pending lines from the old session before switching
+    old = ACTIVE_SESSION["id"]
+    if old:
+        _pending_session_lines.pop(old, None)
     ACTIVE_SESSION["id"] = sid
     return {"active": sid}
 

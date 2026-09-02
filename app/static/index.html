@@ -90,6 +90,7 @@
         <button id="saveTranscript" class="ghost">💾 保存翻译记录</button>
         <button id="saveSrt" class="ghost">导出 SRT 字幕</button>
         <button id="saveDoc" class="ghost">导出 Word</button>
+        <button id="loadHistoryBtn" class="ghost" onclick="loadHistory()">📥 加载完整记录</button>
         <span style="color:var(--dim);font-size:12px">当前课程全部原文+翻译，可随时复看</span>
       </div>
       <div id="subs"></div>
@@ -210,12 +211,37 @@ function setStatus(s, extra="") { $("status").textContent = s + (extra?` · ${ex
 function escapeHtml(s){return (s||"").replace(/[&<>"']/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));}
 const fmtTs = s => `${String(Math.floor(s/60)).padStart(2,"0")}:${String(Math.round(s%60)).padStart(2,"0")}`;
 
+const DOM_LINE_LIMIT = 500;  // ~50 min visible scroll; full history via loadHistory()
 function addLine(orig, zh, offset) {  // captions only — AI answers go to #aiOut
   const ts = offset != null ? `${fmtTs(offset)} · ` : "";
   const d = document.createElement("div"); d.className = "line";
   d.innerHTML = `<div class="orig">${ts}${escapeHtml(orig)}</div><div class="zh">${escapeHtml(zh)}</div>`;
   $("subs").prepend(d);
-  while ($("subs").children.length > 60) $("subs").lastChild.remove();
+  while ($("subs").children.length > DOM_LINE_LIMIT) $("subs").lastChild.remove();
+}
+
+// Load the full session transcript from the server (for scrolling back past DOM limit)
+async function loadHistory() {
+  if (!sessionId) return setStatus("请先新建课程");
+  setStatus("加载完整记录...");
+  try {
+    const s = await (await fetch(`/api/sessions/${sessionId}`)).json();
+    const transcript = s.transcript || [];
+    if (!transcript.length) return setStatus("该课程暂无字幕记录");
+    $("subs").innerHTML = "";
+    // Render all lines newest-first (server returns chronological, reverse for prepend logic)
+    for (let i = transcript.length - 1; i >= 0; i--) {
+      const t = transcript[i];
+      const ts = t.offset != null ? `${fmtTs(t.offset)} · ` : "";
+      const d = document.createElement("div"); d.className = "line";
+      d.innerHTML = `<div class="orig">${ts}${escapeHtml(t.text)}</div><div class="zh">${escapeHtml(t.translation || '')}</div>`;
+      $("subs").appendChild(d);
+    }
+    // Sync in-memory arrays with full transcript
+    original = transcript.map(t => t.text);
+    lines = transcript.map(t => ({orig: t.text, zh: t.translation, offset: t.offset}));
+    setStatus("完整记录已加载", `${transcript.length} 段`);
+  } catch(e) { setStatus("加载失败", e.message); }
 }
 
 function addAiCard(title, text) {
@@ -234,6 +260,9 @@ async function poll() {
       lines.push({orig: l.text, zh: l.translation, offset: l.offset});
       addLine(l.text, l.translation, l.offset);
     }
+    // cap in-memory arrays (full history is in session JSON on the server)
+    const MAX_INMEMORY = 3000;
+    if (original.length > MAX_INMEMORY) { original.splice(0, original.length - MAX_INMEMORY); lines.splice(0, lines.length - MAX_INMEMORY); }
     pollSince = j.next;
     const waiting = j.bridge_online && j.bridge_window === false;   // alive but no caption window yet
     $("bridgeLamp").textContent = waiting ? "🟡 字幕桥等待字幕窗口"
