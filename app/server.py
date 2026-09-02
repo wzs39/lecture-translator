@@ -459,14 +459,60 @@ class MaterialReq(BaseModel):
     content_b64: str = ""
 
 
+def _pdf_pages_to_pngs(data: bytes, max_pages: int = 12) -> list[str]:
+    """Render PDF pages to base64 PNGs (PyMuPDF) for vision-model OCR."""
+    import fitz
+    out = []
+    with fitz.open(stream=data, filetype="pdf") as doc:
+        if doc.needs_pass:
+            return out  # encrypted without a password: handled by the caller
+        for page in doc:
+            if len(out) >= max_pages:
+                break
+            pix = page.get_pixmap(dpi=110)  # ~1500px wide: enough for OCR
+            out.append(base64.b64encode(pix.tobytes("png")).decode())
+    return out
+
+
+async def _vlm_ocr_images(images_b64: list[str], hint: str) -> str:
+    """Transcribe page images via the configured cloud vision model
+    (GLM-4.5V family). Falls back to raising so the caller can 422."""
+    content: list[dict] = []
+    for i, img in enumerate(images_b64):
+        content.append({"type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{img}"}})
+    content.append({"type": "text",
+                    "text": "Transcribe ALL readable text from these lecture "
+                            f"{hint} pages, page by page, in reading order. Keep "
+                            "formulas, numbers and technical terms exactly as "
+                            "written. Output only the transcription."})
+    async with httpx.AsyncClient(timeout=180) as cx:
+        r = await cx.post(f"{CONFIG['ai_base']}/chat/completions",
+                          headers={"Authorization": f"Bearer {CONFIG['ai_key']}"},
+                          json={"model": "glm-4.5v",
+                                "messages": [{"role": "user", "content": content}],
+                                "max_tokens": 4096, "stream": False})
+        r.raise_for_status()
+        return r.json()["choices"][0]["message"]["content"].strip()
+
+
 def _extract_text(name: str, data: bytes) -> str:
     """Pull readable text from an uploaded PDF/PPTX/DOCX/TXT/MD file."""
     lower = name.lower()
     import io
     if lower.endswith(".pdf"):
         from pypdf import PdfReader
-        rd = PdfReader(io.BytesIO(data))
-        return "\n".join((p.extract_text() or "") for p in rd.pages)
+        try:
+            rd = PdfReader(io.BytesIO(data))
+            if rd.is_encrypted:
+                try:
+                    rd.decrypt("")  # owner-password-only PDFs open with ""
+                except Exception:
+                    pass
+            text = "\n".join((p.extract_text() or "") for p in rd.pages)
+        except Exception:
+            text = ""
+        return text
     if lower.endswith(".docx"):
         import docx
         d = docx.Document(io.BytesIO(data))
@@ -480,6 +526,23 @@ def _extract_text(name: str, data: bytes) -> str:
                 if hasattr(shape, "text") and getattr(shape, "text", "").strip():
                     out.append(shape.text.strip())
         return "\n".join(out)
+    if lower.endswith(".ppt"):
+        # legacy binary PowerPoint: walk the stream and decode the text atom
+        # records (TextCharsAtom 0x0FA0 = UTF-16LE, TextBytesAtom 0x0FA8)
+        import struct as _struct
+        chunks, i = [], 0
+        while i + 8 <= len(data):
+            _, rec_type, rec_len = _struct.unpack("<HHI", data[i:i + 8])
+            if rec_type in (0x0FA0, 0x0FA8) and 0 < rec_len <= len(data) - i - 8:
+                body = data[i + 8:i + 8 + rec_len]
+                s = body.decode("utf-16-le" if rec_type == 0x0FA0 else "cp1252",
+                                errors="ignore")
+                if s.strip() and sum(c.isprintable() for c in s) / max(len(s), 1) > 0.7:
+                    chunks.append(s)
+                i += 8 + rec_len
+            else:
+                i += 1
+        return "\n".join(chunks)
     if lower.endswith((".txt", ".md", ".text")) or not lower:
         try:
             return data.decode("utf-8")
@@ -489,8 +552,13 @@ def _extract_text(name: str, data: bytes) -> str:
 
 
 @app.post("/api/sessions/{sid}/materials")
-def add_material(sid: str, req: MaterialReq):
-    """Upload a lecture reference file and extract its text for the AI."""
+async def add_material(sid: str, req: MaterialReq):
+    """Upload a lecture reference file and extract its text for the AI.
+
+    Plain text layers are extracted locally (pypdf/python-pptx/python-docx).
+    When that fails or finds too little text — scanned PDFs, image-only
+    slides, encrypted files, complex layouts — the pages are rendered to
+    images and transcribed by the cloud vision model (GLM-4.5V)."""
     _session_path(sid)  # 404 unless the course exists
     if not req.content_b64:
         raise HTTPException(400, "content is required")
@@ -504,14 +572,31 @@ def add_material(sid: str, req: MaterialReq):
     except ValueError as e:
         raise HTTPException(415, str(e))
     except Exception as e:
-        raise HTTPException(422, f"could not parse {req.name}: {e}")
+        text = ""
+        log.warning("local extraction failed for %s: %s", req.name, e)
+    how = "text"
+    # weak extraction: scanned PDF, encrypted pages, image-heavy slides -> VLM OCR
+    if len(text.strip()) < 200 and data[:4] == b"%PDF" and CONFIG["ai_key"].strip():
+        try:
+            pages = await asyncio.to_thread(_pdf_pages_to_pngs, data)
+            if pages:
+                text = await _vlm_ocr_images(pages, "PDF")
+                how = "vision"
+        except Exception as e:
+            log.warning("VLM OCR failed for %s: %s", req.name, e)
+            if not text.strip():
+                raise HTTPException(422,
+                    f"{req.name}: 本地无可读文本且视觉识别失败（检查云端 Key 或换文本版 PDF）")
     if not text.strip():
-        raise HTTPException(422, f"no readable text found in {req.name} (scanned PDF?)")
+        detail = f"no readable text found in {req.name} (scanned PDF?)"
+        if data[:4] == b"%PDF" and not CONFIG["ai_key"].strip():
+            detail += " — 本地解析不到文本，配置云端 Key 后可用 AI 视觉识别扫描版"
+        raise HTTPException(422, detail)
     mats = _load_materials(sid)
     mats = [m for m in mats if m.get("name") != req.name]  # replace same-named
-    mats.insert(0, {"name": req.name, "text": text, "chars": len(text)})
+    mats.insert(0, {"name": req.name, "text": text, "chars": len(text), "via": how})
     _save_json(_materials_path(sid), {"materials": mats})
-    return {"materials": [{"name": m["name"], "chars": m["chars"]} for m in mats]}
+    return {"materials": [{"name": m["name"], "chars": m["chars"], "via": m.get("via", "text")} for m in mats]}
 
 
 @app.get("/api/sessions/{sid}/materials")

@@ -457,8 +457,7 @@ async function loadMaterials() {
   if (!sessionId) { list.innerHTML = ""; return; }
   try {
     const j = await (await fetch(`/api/sessions/${sessionId}/materials`)).json();
-    list.innerHTML = (j.materials || []).length
-      ? j.materials.map(m => `<span class="mat" style="display:inline-block">📄 ${escapeHtml(m.name)} (${m.chars}字) <a href="#" data-mview="${escapeHtml(m.name)}" style="color:var(--acc)">查看</a> <a href="#" data-mdel="${escapeHtml(m.name)}" style="color:var(--acc)">删除</a></span>`).join(" ")
+    list.innerHTML = (j.materials || []).length      ? j.materials.map(m => `<span class="mat" style="display:inline-block">📄 ${escapeHtml(m.name)} (${m.chars}字${m.via === "vision" ? " · 👁 AI识别" : ""}) <a href="#" data-mview="${escapeHtml(m.name)}" style="color:var(--acc)">查看</a> <a href="#" data-mdel="${escapeHtml(m.name)}" style="color:var(--acc)">删除</a></span>`).join("")
       : "<span style='color:var(--dim)'>未上传讲义 — AI 仅凭字幕回答，上传后可据此纠错并补充</span>";
     list.querySelectorAll("[data-mview]").forEach(a => a.onclick = async (e) => {
       e.preventDefault();
