@@ -217,7 +217,12 @@ def mark_confirmed(n):
 
 
 class Delivery:
-    """In-order, at-least-once delivery with a durable backlog."""
+    """In-order, at-least-once delivery with a durable backlog.
+
+    A dedicated daemon thread does the POSTs so a slow translation backend
+    never stalls the caption-capture loop: chunks are journaled and queued
+    instantly, then delivered as fast as the backend responds (retrying the
+    head every RETRY_EVERY seconds while it is down)."""
 
     def __init__(self, url):
         self.url = url
@@ -227,41 +232,53 @@ class Delivery:
             entries = [json.loads(ln) for ln in
                        JOURNAL_PATH.read_text(encoding="utf-8").splitlines() if ln.strip()]
             self.unsent.extend(entries[confirmed:])
-        self.last_try = 0.0
+        self._wake = threading.Condition()
+        threading.Thread(target=self._run, daemon=True).start()
 
     def submit(self, text, offset):
         journal_append(text, offset)          # durable BEFORE sending
-        self.unsent.append({"text": text, "offset": offset})
-        self._try_deliver()
+        with self._wake:
+            self.unsent.append({"text": text, "offset": offset})
+            self._wake.notify()
 
-    def retry_due(self, now):
-        return bool(self.unsent) and now - self.last_try >= RETRY_EVERY
+    def _run(self):
+        """Deliver queued chunks one at a time, in order, forever."""
+        while True:
+            with self._wake:
+                if not self.unsent:
+                    self._wake.wait()
+                    continue
+            if not self._deliver_one():
+                time.sleep(RETRY_EVERY)  # backend down: keep the head, retry soon
+            else:
+                time.sleep(0.05)
 
-    def retry(self, now):
-        self.last_try = now
-        self._try_deliver()
-
-    def _try_deliver(self):
-        while self.unsent:
+    def _deliver_one(self) -> bool:
+        """POST the head chunk; returns False when it must stay queued."""
+        with self._wake:
+            if not self.unsent:
+                return True
             entry = self.unsent[0]
-            try:
-                r = requests.post(f"{self.url}/api/captions",
-                                  json={"text": entry["text"], "offset": entry["offset"]},
-                                  timeout=90)
-                ok = r.ok
-                line = r.json() if ok else {}
-            except Exception as e:
-                ok, line = False, {}
-                print(f"  backend unreachable ({e}); cached, will retry")
-            if not ok:
-                break  # keep order: stop at the first failure
-            shown = line.get("translation", "")
-            print(f"[{int(entry['offset']//60):02d}:{int(entry['offset']%60):02d}] OK {entry['text']}")
-            if shown:
-                print(f"        -> {shown}")
+        try:
+            r = requests.post(f"{self.url}/api/captions",
+                              json={"text": entry["text"], "offset": entry["offset"]},
+                              timeout=90)
+            ok = r.ok
+            line = r.json() if ok else {}
+        except Exception as e:
+            ok, line = False, {}
+            print(f"  backend unreachable ({e}); cached, will retry")
+        if not ok:
+            return False
+        shown = line.get("translation", "")
+        print(f"[{int(entry['offset']//60):02d}:{int(entry['offset']%60):02d}] OK {entry['text']}")
+        if shown:
+            print(f"        -> {shown}")
+        with self._wake:
             self.unsent.popleft()
             total, _ = journal_state()
             mark_confirmed(total - len(self.unsent))
+        return True
 
 
 def _host_disk_free_gb(drive):
@@ -414,8 +431,6 @@ def main():
                 if chunker.due(now):  # speaker paused: flush the tail
                     ctext, coff = chunker.flush()
                     delivery.submit(ctext, coff)
-                if delivery.retry_due(now):
-                    delivery.retry(now)
             except Exception as e:
                 # stale handle: re-discover the window and keep going
                 BRIDGE_STATE["last_error"] = str(e)[:120]

@@ -397,6 +397,9 @@ def _translation_system() -> str:
 
 # ---- course materials (uploaded PDF/PPTX/DOCX/TXT reference files) ------ #
 MATERIALS_TOKENS = 6000  # ~1500-2500 tokens of reference text injected into AI prompts
+# Live caption translation: a small slice of the slides is enough to ground the
+# topic; the full budget is reserved for ask/organize where the question matters.
+TRANSLATE_MATERIALS_CHARS = 800
 
 
 def _materials_path(sid: str) -> Path:
@@ -407,13 +410,13 @@ def _load_materials(sid: str) -> list:
     return _load_json(_materials_path(sid), {"materials": []}).get("materials", [])
 
 
-def _materials_block(question: str = "") -> str:
+def _materials_block(question: str = "", cap: int = MATERIALS_TOKENS) -> str:
     """Course reference text (slides/notes) the AI uses to correct and supplement
     the translation. A 40-page PDF is far larger than any prompt window, so when
-    total extracted text exceeds MATERIALS_TOKENS we select the chunks most
-    relevant to the current question (keyword overlap retrieval — a minimal RAG
-    without embeddings); with no question (translation path) the head+tail are
-    kept. A truncation notice is appended whenever anything was dropped."""
+    total extracted text exceeds the cap we select the chunks most relevant to
+    the current question (keyword overlap retrieval — a minimal RAG without
+    embeddings); with no question (translation path) the head is kept. A
+    truncation notice is appended whenever anything was dropped."""
     sid = ACTIVE_SESSION["id"]
     if not sid:
         return ""
@@ -422,7 +425,7 @@ def _materials_block(question: str = "") -> str:
         return ""
     total_len = sum(len(m["text"]) for m in mats)
     selected: list[tuple[str, str]] = []  # (name, text)
-    if total_len <= MATERIALS_TOKENS:
+    if total_len <= cap:
         selected = [(m["name"], m["text"].strip()) for m in mats]
     else:
         # split into ~800-char chunks on sentence boundaries, score by keyword
@@ -440,7 +443,7 @@ def _materials_block(question: str = "") -> str:
                 low = part.lower()
                 score = sum(low.count(t) for t in q_terms)
                 pool.append((score, m["name"], part))
-        budget = MATERIALS_TOKENS
+        budget = cap
         for score, name, part in sorted(pool, key=lambda x: -x[0]):
             if budget <= 0:
                 break
@@ -453,7 +456,7 @@ def _materials_block(question: str = "") -> str:
         total += len(text)
     if not chunks:
         return ""
-    notice = "\n[文档过长，已按问题相关性截断]" if total_len > MATERIALS_TOKENS else ""
+    notice = "\n[文档过长，已按问题相关性截断]" if total_len > cap else ""
     return "\n\nCourse reference material (use it to correct terms and supplement the" \
            " translation; the lecturer's own slides/notes):\n" + "\n\n".join(chunks) + notice
 
@@ -708,6 +711,25 @@ def save_session_notes(sid: str, req: NotesReq):
     return {"saved": True, "chars": len(req.notes)}
 
 
+# Shared HTTP clients: opening a fresh AsyncClient per call costs a TCP+TLS
+# handshake on every caption (~1-2s to a cloud provider). Reusing one pooled
+# client per backend keeps live translations on a warm connection.
+_cloud_client: httpx.AsyncClient | None = None
+_ollama_client: httpx.AsyncClient | None = None
+
+
+def _shared_client(which: str) -> httpx.AsyncClient:
+    global _cloud_client, _ollama_client
+    c = _cloud_client if which == "cloud" else _ollama_client
+    if c is None or c.is_closed:
+        c = httpx.AsyncClient(timeout=120)
+        if which == "cloud":
+            _cloud_client = c
+        else:
+            _ollama_client = c
+    return c
+
+
 async def ai_complete(prompt: str, json_mode: bool = False, timeout_s: int = 120):
     """AI backend for every AI task (translate, ask, organize, terms, quiz):
     any OpenAI-compatible cloud AI when a key is configured (DeepSeek, GLM-4-Flash
@@ -717,30 +739,29 @@ async def ai_complete(prompt: str, json_mode: bool = False, timeout_s: int = 120
     key = CONFIG["ai_key"]
     if key and _cloud_available("ai"):
         try:
-            async with httpx.AsyncClient(timeout=timeout_s) as cx:
-                body = {"model": CONFIG["ai_model"],
-                        "messages": [{"role": "user", "content": prompt}],
-                        "temperature": 0.3, "max_tokens": 512, "stream": False}
-                if json_mode:
-                    body["response_format"] = {"type": "json_object"}
-                r = await cx.post(f"{CONFIG['ai_base']}/chat/completions",
-                                  headers={"Authorization": f"Bearer {key}"}, json=body)
-                r.raise_for_status()
-                _cloud_cooldowns.pop("ai", None)  # healthy again
-                return r.json()["choices"][0]["message"]["content"].strip(), CONFIG["ai_model"]
+            body = {"model": CONFIG["ai_model"],
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.3, "max_tokens": 512, "stream": False}
+            if json_mode:
+                body["response_format"] = {"type": "json_object"}
+            r = await _shared_client("cloud").post(
+                f"{CONFIG['ai_base']}/chat/completions",
+                headers={"Authorization": f"Bearer {key}"}, json=body, timeout=timeout_s)
+            r.raise_for_status()
+            _cloud_cooldowns.pop("ai", None)  # healthy again
+            return r.json()["choices"][0]["message"]["content"].strip(), CONFIG["ai_model"]
         except Exception as e:
             _mark_rate_limited("ai")
             log.warning("cloud AI failed, falling back to ollama (cooling down %ss): %s",
                         RATE_LIMIT_COOLDOWN, e)
-    async with httpx.AsyncClient(timeout=120) as cx:
-        body = {"model": CONFIG["model"], "prompt": prompt, "stream": False,
-                "think": False, "options": {"temperature": 0.2, "num_predict": 1024}}
-        if json_mode:
-            body["format"] = "json"
-        r = await cx.post(f"{CONFIG['url']}/api/generate", json=body)
-        r.raise_for_status()
-        # qwen3 may leak chain-of-thought before the answer
-        return r.json().get("response", "").split("</think>")[-1].strip(), "ollama"
+    body = {"model": CONFIG["model"], "prompt": prompt, "stream": False,
+            "think": False, "options": {"temperature": 0.2, "num_predict": 1024}}
+    if json_mode:
+        body["format"] = "json"
+    r = await _shared_client("ollama").post(f"{CONFIG['url']}/api/generate", json=body)
+    r.raise_for_status()
+    # qwen3 may leak chain-of-thought before the answer
+    return r.json().get("response", "").split("</think>")[-1].strip(), "ollama"
 
 
 @app.post("/api/ask")
@@ -1048,7 +1069,7 @@ async def _translate_with_model(text: str, target: str, context: str) -> tuple[s
         "natural spoken lecture in Chinese; preserve names, numbers, formulas, and "
         "technical terms; resolve ambiguous words against the course topic/glossary; "
         "do not add explanations or omit information; output ONLY the translation."
-        + _glossary_block() + _materials_block()
+        + _glossary_block() + _materials_block(cap=TRANSLATE_MATERIALS_CHARS)
     )
     # bounded so a hung cloud endpoint cannot stall the final retry for 2 minutes
     return await ai_complete(prompt, timeout_s=45)
