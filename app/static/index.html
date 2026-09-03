@@ -488,21 +488,32 @@ $("uploadMaterial").onclick = async () => {
   if (!sessionId) return setStatus("请先新建课程，再上传讲义");
   const f = $("materialFile").files[0];
   if (!f) return setStatus("请选一个 PDF / Word / PPT / 文本文件");
+  const uploadId = (crypto.randomUUID ? crypto.randomUUID() : Date.now() + "-" + Math.random()).replace(/[^a-zA-Z0-9-]/g, "");
   setStatus("上传讲义中...", f.name);
-  // scanned PDFs go through cloud vision OCR (10-30s) — tell the user why it's slow
-  const ocrTimer = setTimeout(() => setStatus("AI 视觉识别中…", "扫描版 PDF 需 10-30 秒，请稍候"), 4000);
+  // scanned PDFs go through cloud vision OCR in batches — poll the server's
+  // /api/ocr-progress so the user sees pages done / total while it runs
+  let ocrSeen = false;
+  const ocrTimer = setInterval(async () => {
+    try {
+      const p = await (await fetch(`/api/ocr-progress?upload_id=${encodeURIComponent(uploadId)}`)).json();
+      if (!p.stage) return;
+      ocrSeen = true;
+      const pct = p.total ? ` ${p.done}/${p.total} 页 (${p.percent}%)` : "";
+      setStatus(`${p.stage}${pct}`, f.name);
+    } catch { /* not in OCR yet (fast text PDF) */ }
+  }, 1200);
   try {
   const buf = await f.arrayBuffer();
   const b64 = btoa(String.fromCharCode(...new Uint8Array(buf)));
   const r = await fetch(`/api/sessions/${sessionId}/materials`, {method:"POST", headers:{"Content-Type":"application/json"},
-    body: JSON.stringify({name: f.name, content_b64: b64})});
+    body: JSON.stringify({name: f.name, content_b64: b64, upload_id: uploadId})});
   const j = await r.json();
   if (!r.ok) return setStatus("上传失败", j.detail || `HTTP ${r.status}`);
   $("materialFile").value = "";
   loadMaterials();
   const via = j.materials && j.materials[0] && j.materials[0].via;
   setStatus(via === "vision" ? "讲义已上传（AI 视觉识别）" : "讲义已上传", "AI 将据此纠错并补充翻译");
-  } finally { clearTimeout(ocrTimer); }
+  } finally { clearInterval(ocrTimer); }
 };
 
 let lastOrganizeText = "";

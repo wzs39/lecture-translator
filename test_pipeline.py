@@ -296,6 +296,20 @@ expect(400, "/api/captions", "POST", {"text": "   "})
 expect(404, "/api/sessions/deadbeef/activate", "POST")
 expect(404, f"/api/sessions/{sid}")
 expect(400, "/api/ai/detect", detail_contains="API Key")
+# --- OCR progress: poll contract + textless-PDF upload with no key -------
+expect(400, "/api/ocr-progress", "GET")                        # missing upload_id
+expect(404, "/api/ocr-progress?upload_id=no-such-job", "GET")  # unknown job
+_scan_sid = post("/api/sessions", {"title": "OcrScan"})["id"]
+post(f"/api/sessions/{_scan_sid}/activate")
+# scanned (textless) PDF + no cloud key -> 422 with a fix hint (OCR path skipped)
+expect(422, f"/api/sessions/{_scan_sid}/materials", "POST",
+       {"name": "scan.pdf",
+        "content_b64": _b64.b64encode(b"%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n"
+                                      b"2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n"
+                                      b"3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]>>endobj\n"
+                                      b"trailer<</Root 1 0 R>>\n%%EOF").decode()},
+       detail_contains="云端")
+expect(200, f"/api/sessions/{_scan_sid}", "DELETE")
 # leave the suite with no live key and the dead test base — a clean, explicit
 # state; the user's saved cloud config is deliberately NOT restored (tests must
 # not depend on or mutate real credentials).

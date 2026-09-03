@@ -461,26 +461,52 @@ def _materials_block(question: str = "") -> str:
 class MaterialReq(BaseModel):
     name: str = "material"
     content_b64: str = ""
+    upload_id: str = ""  # optional: lets the client poll /api/ocr-progress
 
 
-def _pdf_pages_to_pngs(data: bytes, max_pages: int = 20) -> tuple[list[str], int]:
-    """Render PDF pages to base64 PNGs (PyMuPDF) for vision-model OCR.
-    Returns ([images], total_page_count) so the caller can warn on truncation."""
+# Vision OCR: pages are sent to the cloud model in batches (the model degrades
+# with many images in one request) and merged with page markers. A hard cap
+# keeps very long decks from running forever; anything beyond it is reported.
+OCR_BATCH = 6
+OCR_MAX_PAGES = 60
+OCR_PROGRESS: dict[str, dict] = {}  # upload_id -> {stage, done, total, percent}
+
+
+def _set_ocr_progress(upload_id: str, stage: str, done: int = 0, total: int = 0,
+                      error: str = ""):
+    """Record OCR progress for a client polling /api/ocr-progress."""
+    if not upload_id:
+        return
+    OCR_PROGRESS[upload_id] = {"stage": stage, "done": done, "total": total,
+                               "percent": round(done * 100 / total) if total else 0,
+                               "error": error, "ts": time.time()}
+    if len(OCR_PROGRESS) > 64:  # prune entries older than 10 minutes
+        now = time.time()
+        for k in [k for k, v in OCR_PROGRESS.items() if now - v.get("ts", 0) > 600]:
+            OCR_PROGRESS.pop(k, None)
+
+
+def _pdf_page_count(data: bytes) -> int:
+    """Total page count of a PDF (fast: reads the page tree only)."""
+    import fitz
+    with fitz.open(stream=data, filetype="pdf") as doc:
+        return doc.page_count
+
+
+def _pdf_pages_to_pngs(data: bytes, start: int, count: int) -> list[str]:
+    """Render PDF pages [start, start+count) to base64 PNGs (PyMuPDF)."""
     import fitz
     out = []
     with fitz.open(stream=data, filetype="pdf") as doc:
-        total = doc.page_count
         if doc.needs_pass:
-            return [], total  # encrypted without a password: handled by the caller
-        for page in doc:
-            if len(out) >= max_pages:
-                break
-            pix = page.get_pixmap(dpi=110)  # ~1500px wide: enough for OCR
+            return []  # encrypted without a password: handled by the caller
+        for i in range(start, min(start + count, doc.page_count)):
+            pix = doc[i].get_pixmap(dpi=110)  # ~1500px wide: enough for OCR
             out.append(base64.b64encode(pix.tobytes("png")).decode())
-    return out, total
+    return out
 
 
-async def _vlm_ocr_images(images_b64: list[str], hint: str) -> str:
+async def _vlm_ocr_images(images_b64: list[str], hint: str, page_label: str = "") -> str:
     """Transcribe page images via a cloud vision model. Prefers an explicitly
     configured vision model (ai_vision_model), then GLM-4.5V (free tier), then
     the configured chat model — so DeepSeek/OpenRouter/etc. users keep working
@@ -493,7 +519,8 @@ async def _vlm_ocr_images(images_b64: list[str], hint: str) -> str:
                         "image_url": {"url": f"data:image/png;base64,{img}"}})
     content.append({"type": "text",
                     "text": "Transcribe ALL readable text from these lecture "
-                            f"{hint} pages, page by page, in reading order. Keep "
+                            f"{hint} pages{(' ' + page_label) if page_label else ''}, "
+                            "page by page, in reading order. Keep "
                             "formulas, numbers and technical terms exactly as "
                             "written. Output only the transcription."})
     last_err = None
@@ -597,17 +624,34 @@ async def add_material(sid: str, req: MaterialReq):
         text = ""
         log.warning("local extraction failed for %s: %s", req.name, e)
     how = "text"
-    # weak extraction: scanned PDF, encrypted pages, image-heavy slides -> VLM OCR
+    # weak extraction: scanned PDF, encrypted pages, image-heavy slides -> VLM OCR.
+    # Pages are OCRed in batches (6/request) and merged with page markers; the
+    # client can poll /api/ocr-progress with the upload_id while this runs.
     if len(text.strip()) < 200 and data[:4] == b"%PDF" and CONFIG["ai_key"].strip():
         try:
-            pages, total_pages = await asyncio.to_thread(_pdf_pages_to_pngs, data)
-            if pages:
-                text = await _vlm_ocr_images(pages, "PDF")
+            _set_ocr_progress(req.upload_id, "读取 PDF 页数…")
+            total_pages = await asyncio.to_thread(_pdf_page_count, data)
+            to_ocr = min(total_pages, OCR_MAX_PAGES)
+            parts = []
+            for start in range(0, to_ocr, OCR_BATCH):
+                _set_ocr_progress(req.upload_id, "渲染页面…", start, to_ocr)
+                batch = await asyncio.to_thread(
+                    _pdf_pages_to_pngs, data, start, min(OCR_BATCH, to_ocr - start))
+                if not batch:
+                    break  # encrypted without a password
+                _set_ocr_progress(req.upload_id, "AI 识别中…", start, to_ocr)
+                label = f"[第 {start + 1}-{start + len(batch)} 页]"
+                part = await _vlm_ocr_images(batch, "PDF", label)
+                parts.append(label + "\n" + part.strip())
+            _set_ocr_progress(req.upload_id, "完成", to_ocr, to_ocr)
+            if parts:
+                text = "\n\n".join(parts)
                 how = "vision"
-                if total_pages > len(pages):
-                    text += f"\n[仅识别前 {len(pages)} 页，共 {total_pages} 页]"
+                if total_pages > to_ocr:
+                    text += f"\n[仅识别前 {to_ocr} 页，共 {total_pages} 页，其余请拆分上传]"
         except Exception as e:
             log.warning("VLM OCR failed for %s: %s", req.name, e)
+            _set_ocr_progress(req.upload_id, "识别失败", error=str(e))
             if not text.strip():
                 raise HTTPException(422,
                     f"{req.name}: 本地无可读文本且视觉识别失败（检查云端 Key 或换文本版 PDF）")
@@ -621,6 +665,17 @@ async def add_material(sid: str, req: MaterialReq):
     mats.insert(0, {"name": req.name, "text": text, "chars": len(text), "via": how})
     _save_json(_materials_path(sid), {"materials": mats})
     return {"materials": [{"name": m["name"], "chars": m["chars"], "via": m.get("via", "text")} for m in mats]}
+
+
+@app.get("/api/ocr-progress")
+def ocr_progress(upload_id: str = ""):
+    """Polling endpoint for in-flight vision OCR: stage + pages done/total."""
+    if not upload_id:
+        raise HTTPException(400, "upload_id is required")
+    p = OCR_PROGRESS.get(upload_id)
+    if not p:
+        raise HTTPException(404, "no OCR job with this upload_id")
+    return {k: v for k, v in p.items() if k != "ts"}
 
 
 @app.get("/api/sessions/{sid}/materials")
