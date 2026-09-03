@@ -235,15 +235,24 @@ def _cache_key(text, target, context):
     return f"{norm}|{target}|{ctx}"
 
 
+TRANSLATION_CACHE_TTL = 3600.0  # L1 exact-match entries expire after 1 hour
+
+
 def cache_get(key):
+    """L1 cache: exact-string matches only (never fuzzy), so a hit returns the
+    same translation the model produced before — zero accuracy risk."""
     hit = _translation_cache.get(key)
-    if hit is not None:  # refresh LRU order
-        _translation_cache[key] = hit
-    return hit
+    if hit is None:
+        return None
+    if time.time() - hit[0] > TRANSLATION_CACHE_TTL:
+        _translation_cache.pop(key, None)
+        return None
+    _translation_cache[key] = hit  # refresh LRU order
+    return hit[1]
 
 
 def cache_put(key, value):
-    _translation_cache[key] = value
+    _translation_cache[key] = (time.time(), value)
     while len(_translation_cache) > TRANSLATION_CACHE_MAX:
         _translation_cache.pop(next(iter(_translation_cache)))
 
@@ -713,7 +722,9 @@ def save_session_notes(sid: str, req: NotesReq):
 
 # Shared HTTP clients: opening a fresh AsyncClient per call costs a TCP+TLS
 # handshake on every caption (~1-2s to a cloud provider). Reusing one pooled
-# client per backend keeps live translations on a warm connection.
+# client per backend keeps live translations on a warm connection; HTTP/2
+# multiplexes requests on that one connection (httpx falls back to HTTP/1.1
+# automatically for servers without h2, e.g. local Ollama).
 _cloud_client: httpx.AsyncClient | None = None
 _ollama_client: httpx.AsyncClient | None = None
 
@@ -722,12 +733,30 @@ def _shared_client(which: str) -> httpx.AsyncClient:
     global _cloud_client, _ollama_client
     c = _cloud_client if which == "cloud" else _ollama_client
     if c is None or c.is_closed:
-        c = httpx.AsyncClient(timeout=120)
+        c = httpx.AsyncClient(timeout=120, http2=True)
         if which == "cloud":
             _cloud_client = c
         else:
             _ollama_client = c
     return c
+
+
+async def _warm_cloud():
+    """Fire-and-forget warm-up: establish the pooled connection and the
+    provider-side session before the first real caption lands, so the first
+    translation does not pay cold-start latency. The result is discarded;
+    errors are ignored — this must never fail an activation."""
+    if not CONFIG["ai_key"].strip():
+        return
+    try:
+        await _shared_client("cloud").post(
+            f"{CONFIG['ai_base']}/chat/completions",
+            headers={"Authorization": f"Bearer {CONFIG['ai_key']}"},
+            json={"model": CONFIG["ai_model"],
+                  "messages": [{"role": "user", "content": "warm-up"}],
+                  "max_tokens": 1}, timeout=5)
+    except Exception:
+        pass
 
 
 async def ai_complete(prompt: str, json_mode: bool = False, timeout_s: int = 120):
@@ -1089,6 +1118,9 @@ async def translate_text(text: str, target: str, context: str = "") -> tuple[str
     hit = cache_get(key)
     if hit is not None:
         return hit[0], "cache"
+    # L1 exact-match cache is for short repeated phrases only (the professor's
+    # catchphrases, fixed terms); long captions stay uncached to bound memory
+    cacheable = len(text) <= 200
     to = CLOUD_TARGET.get(target, "zh-CN")
     # kick off the context-aware model first; shielded so the 2.5s grace
     # timeout does NOT cancel it — the final retry below still awaits it
@@ -1120,17 +1152,20 @@ async def translate_text(text: str, target: str, context: str = "") -> tuple[str
             except Exception as e:
                 log.warning("%s failed: %s", cloud.__name__, e)
     if model_out:
-        cache_put(key, (model_out, model_backend))
+        if cacheable:
+            cache_put(key, (model_out, model_backend))
         return model_out, model_backend
     if mt_text:
-        cache_put(key, (mt_text, "machine"))
+        if cacheable:
+            cache_put(key, (mt_text, "machine"))
         return mt_text, "machine"
     # both fell through: the model task is still running (never cancelled
     # above thanks to the shield) — give it one final unconstrained try.
     try:
         out, backend = await asyncio.wait_for(asyncio.shield(model_task), timeout=60)
         if out:
-            cache_put(key, (out, backend))
+            if cacheable:
+                cache_put(key, (out, backend))
             return out, backend
     except (asyncio.CancelledError, asyncio.TimeoutError):
         model_task.cancel()
@@ -1378,13 +1413,16 @@ def update_session(sid: str, req: ArchiveReq):
 
 
 @app.post("/api/sessions/{sid}/activate")
-def activate_session(sid: str):
+async def activate_session(sid: str):
     _session_path(sid)  # 404 unless it exists
     # flush pending lines from the old session before switching
     old = ACTIVE_SESSION["id"]
     if old:
         _pending_session_lines.pop(old, None)
     ACTIVE_SESSION["id"] = sid
+    # warm the cloud connection + provider session so the first caption of
+    # this course does not pay cold-start latency (fire-and-forget)
+    asyncio.create_task(_warm_cloud())
     return {"active": sid}
 
 
